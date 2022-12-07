@@ -85,9 +85,13 @@ function StandardView:post_layout()
     self.winopts.diff2.a.winhl = {
       "DiffAdd:DiffviewDiffAddAsDelete",
       "DiffDelete:DiffviewDiffDelete",
+      "DiffText:DiffTextDelete",
+      "DiffChange:DiffChangeDelete",
     }
     self.winopts.diff2.b.winhl = {
       "DiffDelete:DiffviewDiffDelete",
+      "DiffText:DiffTextAdd",
+      "DiffChange:DiffChangeAdd",
     }
   end
 end
