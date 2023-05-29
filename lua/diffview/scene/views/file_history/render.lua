@@ -1,78 +1,50 @@
 local PerfTimer = require("diffview.perf").PerfTimer
 local config = require("diffview.config")
 local hl = require("diffview.hl")
-local logger = require("diffview.logger")
 local utils = require("diffview.utils")
 
----@type PerfTimer
+local logger = DiffviewGlobal.logger
 local perf = PerfTimer("[FileHistoryPanel] Render internal")
+local pl = utils.path
 
 local cache = setmetatable({}, { __mode = "k" })
 
 ---@param comp RenderComponent
 ---@param files FileEntry[]
 local function render_files(comp, files)
-  local line_idx = 0
-
   for i, file in ipairs(files) do
-    local s
-    if i == #files then
-      s = "└   "
-    else
-      s = "│   "
-    end
-    comp:add_hl("DiffviewNonText", line_idx, 0, #s)
-    local offset
+    comp:add_text(i == #files and "└   " or "│   ", "DiffviewNonText")
 
     if file.status then
-      offset = #s
-      comp:add_hl(hl.get_git_hl(file.status), line_idx, offset, offset + 1)
-      s = s .. file.status .. " "
+      comp:add_text(file.status .. " ", hl.get_git_hl(file.status))
     end
 
-    offset = #s
-    local icon = hl.get_file_icon(file.basename, file.extension, comp, line_idx, offset)
-    offset = offset + #icon
+    local icon, icon_hl = hl.get_file_icon(file.basename, file.extension)
+    comp:add_text(icon, icon_hl)
+
     if #file.parent_path > 0 then
-      comp:add_hl("DiffviewFilePanelPath", line_idx, offset, offset + #file.parent_path + 1)
+      comp:add_text(file.parent_path .. "/", "DiffviewFilePanelPath")
     end
-    comp:add_hl(
-      "DiffviewFilePanelFileName",
-      line_idx,
-      offset + #file.path - #file.basename,
-      offset + #file.basename
-    )
-    s = s .. icon .. file.path
+
+    comp:add_text(file.basename, file.active and "DiffviewFilePanelSelected" or "DiffviewFilePanelFileName")
 
     if file.stats then
-      offset = #s + 1
-      comp:add_hl(
-        "DiffviewFilePanelInsertions",
-        line_idx,
-        offset,
-        offset + string.len(file.stats.additions --[[@as string ]])
-      )
-      offset = offset + string.len(file.stats.additions --[[@as string ]]) + 2
-      comp:add_hl(
-        "DiffviewFilePanelDeletions",
-        line_idx,
-        offset,
-        offset + string.len(file.stats.deletions --[[@as string ]])
-      )
-      s = s .. " " .. file.stats.additions .. ", " .. file.stats.deletions
+      comp:add_text(" " .. file.stats.additions, "DiffviewFilePanelInsertions")
+      comp:add_text(", ")
+      comp:add_text(tostring(file.stats.deletions), "DiffviewFilePanelDeletions")
     end
 
-    comp:add_line(s)
-    line_idx = line_idx + 1
+    comp:ln()
   end
 
   perf:lap("files")
 end
 
+---@param panel FileHistoryPanel
 ---@param parent CompStruct RenderComponent struct
 ---@param entries LogEntry[]
 ---@param updating boolean
-local function render_entries(parent, entries, updating)
+local function render_entries(panel, parent, entries, updating)
   local c = config.get_config()
   local max_num_files = -1
   local max_len_stats = 7
@@ -100,73 +72,52 @@ local function render_entries(parent, entries, updating)
     end
 
     local entry_struct = parent[i]
-    local line_idx = 0
-    local offset = 0
     local comp = entry_struct.commit.comp
-    local s = ""
 
     if not entry.single_file then
-      comp:add_hl("CursorLineNr", line_idx, 0, 3)
-      s = (entry.folded and c.signs.fold_closed or c.signs.fold_open) .. " "
+      comp:add_text((entry.folded and c.signs.fold_closed or c.signs.fold_open) .. " ", "CursorLineNr")
     end
 
     if entry.status then
-      offset = #s
-      comp:add_hl(hl.get_git_hl(entry.status), line_idx, offset, offset + 1)
-      s = s .. entry.status
+      comp:add_text(entry.status, hl.get_git_hl(entry.status))
     end
 
     if not entry.single_file then
-      offset = #s
       local counter = " "
         .. utils.str_left_pad(tostring(#entry.files), #tostring(max_num_files))
         .. (" file%s"):format(#entry.files > 1 and "s" or " ")
-      comp:add_hl("DiffviewFilePanelCounter", line_idx, offset, offset + #counter)
-      s = s .. counter
+      comp:add_text(counter, "DiffviewFilePanelCounter")
     end
 
     if entry.stats then
       local adds = tostring(entry.stats.additions)
       local dels = tostring(entry.stats.deletions)
-      local w = max_len_stats - (#adds + #dels)
-
-      comp:add_hl("DiffviewNonText", line_idx, #s + 1, #s + 2)
-      s = s .. " | "
-      offset = #s
-      comp:add_hl("DiffviewFilePanelInsertions", line_idx, offset, offset + #adds)
-      comp:add_hl(
-        "DiffviewFilePanelDeletions",
-        line_idx,
-        offset + #adds + w,
-        offset + #adds + w + #dels
-      )
-      s = s .. adds .. string.rep(" ", w) .. dels .. " | "
-      comp:add_hl("DiffviewNonText", line_idx, #s - 2, #s)
+      comp:add_text(" | ", "DiffviewNonText")
+      comp:add_text(adds, "DiffviewFilePanelInsertions")
+      comp:add_text(string.rep(" ", max_len_stats - (#adds + #dels)))
+      comp:add_text(dels, "DiffviewFilePanelDeletions")
+      comp:add_text(" | ", "DiffviewNonText")
     end
 
-    offset = #s
     if entry.commit.hash then
-      local hash = entry.commit.hash:sub(1, 8)
-      comp:add_hl("DiffviewSecondary", line_idx, offset, offset + #hash)
-      s = s .. hash .. " "
+      comp:add_text(entry.commit.hash:sub(1, 8) .. " ", "DiffviewSecondary")
     end
 
-    offset = #s
     if entry.commit.ref_names then
-      local ref_names = ("(%s) "):format(entry.commit.ref_names)
-      comp:add_hl("DiffviewReference", line_idx, offset, offset + #ref_names)
-      s = s .. ref_names
+      comp:add_text(("(%s) "):format(entry.commit.ref_names), "DiffviewReference")
     end
 
-    offset = #s
     local subject = utils.str_shorten(entry.commit.subject, 72)
+
     if subject == "" then
       subject = "[empty message]"
     end
-    comp:add_hl("DiffviewFilePanelFileName", line_idx, offset, offset + #subject)
-    s = s .. subject .. " "
 
-    offset = #s
+    comp:add_text(
+      subject .. " ",
+      panel.cur_item[1] == entry and "DiffviewFilePanelSelected" or "DiffviewFilePanelFileName"
+    )
+
     if entry.commit then
       -- 3 months
       local date = (
@@ -174,14 +125,10 @@ local function render_entries(parent, entries, updating)
             and entry.commit.iso_date
           or entry.commit.rel_date
         )
-      local info = entry.commit.author .. ", " .. date
-      comp:add_hl("DiffviewFilePanelPath", line_idx, offset, offset + #info)
-      s = s .. info
+      comp:add_text(entry.commit.author .. ", " .. date, "DiffviewFilePanelPath")
     end
 
-    comp:add_line(s)
-    line_idx = line_idx + 1
-
+    comp:ln()
     perf:lap("entry " .. entry.commit.hash:sub(1, 7))
 
     if not entry.single_file and not entry.folded then
@@ -195,11 +142,11 @@ local function prepare_panel_cache(panel)
   local c = {}
   cache[panel] = c
   c.root_path = panel.state.form == "column"
-      and utils.path:shorten(
-        utils.path:vim_fnamemodify(panel.git_ctx.toplevel, ":~"),
+      and pl:shorten(
+        pl:vim_fnamemodify(panel.adapter.ctx.toplevel, ":~"),
         panel:get_config().width - 6
       )
-    or utils.path:vim_fnamemodify(panel.git_ctx.toplevel, ":~")
+    or pl:vim_fnamemodify(panel.adapter.ctx.toplevel, ":~")
   c.args = table.concat(panel.log_options.single_file.path_args, " ")
 end
 
@@ -212,95 +159,78 @@ return {
 
     perf:reset()
     panel.render_data:clear()
+
     if not cache[panel] then
       prepare_panel_cache(panel)
     end
 
+    local conf = config.get_config()
     local comp = panel.components.header.comp
     local log_options = panel:get_log_options()
     local cached = cache[panel]
-    local line_idx = 0
-    local s
 
     -- root path
-    comp:add_hl("DiffviewFilePanelRootPath", line_idx, 0, #cached.root_path)
-    comp:add_line(cached.root_path)
+    comp:add_text(cached.root_path, "DiffviewFilePanelRootPath")
+    comp:ln()
 
-    local offset
     if panel.single_file then
-      line_idx = line_idx + 1
       if #panel.entries > 0 then
         local file = panel.entries[1].files[1]
 
         -- file path
-        local icon = hl.get_file_icon(file.basename, file.extension, comp, line_idx, 0)
-        offset = #icon
+        local icon, icon_hl = hl.get_file_icon(file.basename, file.extension)
+        comp:add_text(icon, icon_hl)
+
         if #file.parent_path > 0 then
-          comp:add_hl("DiffviewFilePanelPath", line_idx, offset, offset + #file.parent_path + 1)
+          comp:add_text(file.parent_path .. "/", "DiffviewFilePanelPath")
         end
-        comp:add_hl(
-          "DiffviewFilePanelFileName",
-          line_idx,
-          offset + #file.parent_path + 1,
-          offset + #file.basename
-        )
-        s = icon .. file.path
-        comp:add_line(s)
+
+        comp:add_text(file.basename, "DiffviewFilePanelFileName")
+        comp:ln()
       end
     elseif #cached.args > 0 then
-      line_idx = line_idx + 1
-      s = "Showing history for: "
-      comp:add_hl("DiffviewFilePanelPath", line_idx, 0, #s)
-      offset = #s
-      local paths = cached.args
-      comp:add_hl("DiffviewFilePanelFileName", line_idx, offset, offset + #paths)
-      comp:add_line(s .. paths)
+      comp:add_text("Showing history for: ", "DiffviewFilePanelPath")
+      comp:add_text(cached.args, "DiffviewFilePanelFileName")
+      comp:ln()
     end
 
     if log_options.rev_range and log_options.rev_range ~= "" then
-      line_idx = line_idx + 1
-      s = "Revision range: "
-      comp:add_hl("DiffviewFilePanelPath", line_idx, 0, #s)
-      offset = #s
-      s = s .. log_options.rev_range
-      comp:add_hl("DiffviewFilePanelFileName", line_idx, offset, offset + #s)
-      comp:add_line(s)
+      comp:add_text("Revision range: ", "DiffviewFilePanelPath")
+      comp:add_text(log_options.rev_range, "DiffviewFilePanelFileName")
+      comp:ln()
     end
 
     if panel.option_mapping then
-      line_idx = line_idx + 1
-      s = "Options: "
-      comp:add_hl("DiffviewFilePanelPath", line_idx, 0, #s)
-      offset = #s
-      comp:add_hl("DiffviewFilePanelCounter", line_idx, offset, offset + #panel.option_mapping)
-      comp:add_line(s .. panel.option_mapping)
+      comp:add_text("Options: ", "DiffviewFilePanelPath")
+      comp:add_text(panel.option_mapping, "DiffviewFilePanelCounter")
+      comp:ln()
+    end
+
+    if conf.show_help_hints and panel.help_mapping then
+      comp:add_text("Help: ", "DiffviewFilePanelPath")
+      comp:add_text(panel.help_mapping, "DiffviewFilePanelCounter")
+      comp:ln()
     end
 
     -- title
     comp = panel.components.log.title.comp
-    comp:add_line("")
-    line_idx = 1
-    s = "File History"
-    comp:add_hl("DiffviewFilePanelTitle", line_idx, 0, #s)
-    local change_count = "(" .. #panel.entries .. ")"
-    comp:add_hl("DiffviewFilePanelCounter", line_idx, #s + 1, #s + 1 + string.len(change_count))
-    s = s .. " " .. change_count
-    if panel.updating then
-      offset = #s
-      local status = " (Updating...)"
-      comp:add_hl("DiffviewDim1", line_idx, offset, offset + #status)
-      s = s .. status
-    end
-    comp:add_line(s)
+    comp:add_line()
+    comp:add_text("File History ", "DiffviewFilePanelTitle")
+    comp:add_text("(" .. #panel.entries .. ")", "DiffviewFilePanelCounter")
 
+    if panel.updating then
+      comp:add_text(" (Updating...)", "DiffviewDim1")
+    end
+
+    comp:ln()
     perf:lap("header")
 
     if #panel.entries > 0 then
-      render_entries(panel.components.log.entries, panel.entries, panel.updating)
+      render_entries(panel, panel.components.log.entries, panel.entries, panel.updating)
     end
 
     perf:time()
-    logger.lvl(10).s_debug(perf)
+    logger:lvl(10):debug(perf)
   end,
 
   ---@param panel FHOptionPanel
@@ -313,76 +243,42 @@ return {
 
     ---@type RenderComponent
     local comp = panel.components.switches.title.comp
-    local line_idx = 0
-    local offset
     local log_options = panel.parent:get_log_options()
 
-    local s = "Switches"
-    comp:add_hl("DiffviewFilePanelTitle", line_idx, 0, #s)
-    comp:add_line(s)
+    comp:add_line("Switches", "DiffviewFilePanelTitle")
 
     for _, item in ipairs(panel.components.switches.items) do
       ---@type RenderComponent
       comp = item.comp
-      local option = comp.context[2]
-      local enabled = log_options[comp.context[1]]
+      local option = comp.context.option --[[@as FlagOption ]]
+      local enabled = log_options[option.key] --[[@as boolean ]]
 
-      s = " " .. option[1] .. " "
-      comp:add_hl("DiffviewSecondary", 0, 0, #s)
-
-      offset = #s
-      comp:add_hl("DiffviewFilePanelFileName", 0, offset, offset + #option[3])
-      s = s .. option[3] .. " ("
-
-      offset = #s
-      comp:add_hl(
-        enabled and "DiffviewFilePanelCounter" or "DiffviewDim1",
-        0,
-        offset,
-        offset + #option[2]
-      )
-      s = s .. option[2]
-
-      offset = #s
-      comp:add_hl("DiffviewFilePanelFileName", 0, offset, offset + 1)
-      s = s .. ")"
-      comp:add_line(s)
+      comp:add_text(" " .. option.keymap .. " ", "DiffviewSecondary")
+      comp:add_text(option.desc .. " (", "DiffviewFilePanelFileName")
+      comp:add_text(option.flag_name, enabled and "DiffviewFilePanelCounter" or "DiffviewDim1")
+      comp:add_text(")", "DiffviewFilePanelFileName")
+      comp:ln()
     end
 
     comp = panel.components.options.title.comp
-    comp:add_line("")
-    s = "Options"
-    comp:add_hl("DiffviewFilePanelTitle", 1, 0, #s)
-    comp:add_line(s)
+    comp:add_line()
+    comp:add_line("Options", "DiffviewFilePanelTitle")
 
     for _, item in ipairs(panel.components.options.items) do
       ---@type RenderComponent
       comp = item.comp
       ---@type FlagOption
-      local option = comp.context[2]
-      local value = log_options[comp.context[1]] or ""
+      local option = comp.context.option --[[@as FlagOption ]]
+      local value = log_options[option.key] or ""
 
-      s = " " .. option[1] .. " "
-      comp:add_hl("DiffviewSecondary", 0, 0, #s)
+      comp:add_text(" " .. option.keymap .. " ", "DiffviewSecondary")
+      comp:add_text(option.desc .. " (", "DiffviewFilePanelFileName")
 
-      offset = #s
-      comp:add_hl("DiffviewFilePanelFileName", 0, offset, offset + #option[3])
-      s = s .. option[3] .. " ("
+      local empty, display_value = option:render_display(value)
+      comp:add_text(display_value, not empty and "DiffviewFilePanelCounter" or "DiffviewDim1")
 
-      offset = #s
-      local empty, display_value = option:render_value(value)
-      comp:add_hl(
-        not empty and "DiffviewFilePanelCounter" or "DiffviewDim1",
-        0,
-        offset,
-        offset + #display_value
-      )
-      s = s .. display_value
-
-      offset = #s
-      comp:add_hl("DiffviewFilePanelFileName", 0, offset, offset + 1)
-      s = s .. ")"
-      comp:add_line(s)
+      comp:add_text(")", "DiffviewFilePanelFileName")
+      comp:ln()
     end
   end,
   clear_cache = function(panel)

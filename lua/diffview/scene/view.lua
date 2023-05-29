@@ -7,7 +7,7 @@ local Diff3Hor = lazy.access("diffview.scene.layouts.diff_3_hor", "Diff3Hor") --
 local Diff3Ver = lazy.access("diffview.scene.layouts.diff_3_ver", "Diff3Ver") --[[@as Diff3Ver|LazyModule ]]
 local Diff4Mixed = lazy.access("diffview.scene.layouts.diff_4_mixed", "Diff4Mixed") --[[@as Diff4Mixed|LazyModule ]]
 local EventEmitter = lazy.access("diffview.events", "EventEmitter") --[[@as EventEmitter|LazyModule ]]
-local File = lazy.access("diffview.git.file", "File") --[[@as git.File|LazyModule ]]
+local File = lazy.access("diffview.vcs.file", "File") --[[@as vcs.File|LazyModule ]]
 local config = lazy.require("diffview.config") ---@module "diffview.config"
 local oop = lazy.require("diffview.oop") ---@module "diffview.oop"
 local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
@@ -15,14 +15,10 @@ local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
 local api = vim.api
 local M = {}
 
----@class LayoutMode
-
----@class ELayoutMode
----@field HORIZONTAL LayoutMode
----@field VERTICAL LayoutMode
+---@enum LayoutMode
 local LayoutMode = oop.enum({
-  "HORIZONTAL",
-  "VERTICAL",
+  HORIZONTAL = 1,
+  VERTICAL = 2,
 })
 
 ---@class View : diffview.Object
@@ -52,7 +48,7 @@ function View:init(opt)
   self.closing = utils.sate(opt.closing, false)
 
   local function wrap_event(event)
-    DiffviewGlobal.emitter:on(event, function(view, ...)
+    DiffviewGlobal.emitter:on(event, function(_, view, ...)
       local cur_view = require("diffview.lib").get_current_view()
 
       if (view and view == self) or (not view and cur_view == self) then
@@ -102,22 +98,20 @@ end
 
 ---@return Diff2
 function View.get_default_diff2()
-  local name = View.get_default_layout_name()
-
-  if name == -1 then
-    if prefer_horizontal() then
-      return Diff2Hor.__get()
-    else
-      return Diff2Ver.__get()
-    end
+  if prefer_horizontal() then
+    return Diff2Hor.__get()
+  else
+    return Diff2Ver.__get()
   end
-
-  return config.name_to_layout(name) --[[@as Diff2 ]]
 end
 
 ---@return Diff3
 function View.get_default_diff3()
-  return Diff3Hor.__get()
+  if prefer_horizontal() then
+    return Diff3Hor.__get()
+  else
+    return Diff3Ver.__get()
+  end
 end
 
 ---@return Diff4
@@ -132,7 +126,13 @@ end
 
 ---@return Layout # (class) The default layout class.
 function View.get_default_layout()
-  return View.get_default_diff2()
+  local name = View.get_default_layout_name()
+
+  if name == -1 then
+    return View.get_default_diff2()
+  end
+
+  return config.name_to_layout(name --[[@as string ]])
 end
 
 ---@return Layout
@@ -140,11 +140,7 @@ function View.get_default_merge_layout()
   local name = config.get_config().view.merge_tool.layout
 
   if name == -1 then
-    if prefer_horizontal() then
-      return Diff3Hor.__get()
-    else
-      return Diff3Ver.__get()
-    end
+    return View.get_default_diff3()
   end
 
   return config.name_to_layout(name)

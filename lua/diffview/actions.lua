@@ -1,11 +1,13 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 
 local DiffView = lazy.access("diffview.scene.views.diff.diff_view", "DiffView") ---@type DiffView|LazyModule
 local FileHistoryView = lazy.access("diffview.scene.views.file_history.file_history_view", "FileHistoryView") ---@type FileHistoryView|LazyModule
+local HelpPanel = lazy.access("diffview.ui.panels.help_panel", "HelpPanel") ---@type HelpPanel|LazyModule
 local StandardView = lazy.access("diffview.scene.views.standard.standard_view", "StandardView") ---@type StandardView|LazyModule
-local git = lazy.require("diffview.git.utils") ---@module "diffview.git.utils"
 local lib = lazy.require("diffview.lib") ---@module "diffview.lib"
 local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+local vcs_utils = lazy.require("diffview.vcs.utils") ---@module "diffview.vcs.utils"
 
 local Diff1 = lazy.access("diffview.scene.layouts.diff_1", "Diff1") ---@type Diff1|LazyModule
 local Diff2Hor = lazy.access("diffview.scene.layouts.diff_2_hor", "Diff2Hor") ---@type Diff2Hor|LazyModule
@@ -18,6 +20,8 @@ local Diff4 = lazy.access("diffview.scene.layouts.diff_4", "Diff4") ---@type Dif
 local Diff4Mixed = lazy.access("diffview.scene.layouts.diff_4_mixed", "Diff4Mixed") ---@type Diff4Mixed|LazyModule
 
 local api = vim.api
+local await = async.await
+local pl = lazy.access(utils, "path") ---@type PathLib
 
 local M = setmetatable({}, {
   __index = function(_, k)
@@ -27,6 +31,8 @@ local M = setmetatable({}, {
     ):format(k))
   end
 })
+
+M.compat = {}
 
 ---@return FileEntry?
 ---@return integer[]? cursor
@@ -43,11 +49,11 @@ local function prepare_goto_file()
   if file then
     ---@cast file FileEntry
     -- Ensure file exists
-    if not utils.path:readable(file.absolute_path) then
+    if not pl:readable(file.absolute_path) then
       utils.err(
         string.format(
           "File does not exist on disk: '%s'",
-          utils.path:relative(file.absolute_path, ".")
+          pl:relative(file.absolute_path, ".")
         )
       )
       return
@@ -156,8 +162,16 @@ function M.goto_file_tab()
   end
 end
 
----Jump to the next merge conflict marker.
-function M.next_conflict()
+---@class diffview.ConflictCount
+---@field total integer
+---@field current integer
+---@field cur_conflict? ConflictRegion
+---@field conflicts ConflictRegion[]
+
+---@param num integer
+---@param use_delta? boolean
+---@return diffview.ConflictCount?
+function M.jumpto_conflict(num, use_delta)
   local view = lib.get_current_view()
 
   if view and view:instanceof(StandardView.__get()) then
@@ -166,13 +180,29 @@ function M.next_conflict()
     local curfile = main.file
 
     if main:is_valid() and curfile:is_valid() then
-      local conflicts, _, cur_idx = git.parse_conflicts(
+      local next_idx
+      local conflicts, cur, cur_idx = vcs_utils.parse_conflicts(
         api.nvim_buf_get_lines(curfile.bufnr, 0, -1, false),
         main.id
       )
 
       if #conflicts > 0 then
-        local next_idx = math.min(cur_idx, #conflicts) % #conflicts + 1
+        if not use_delta then
+          next_idx = utils.clamp(num, 1, #conflicts)
+        else
+          local delta = num
+
+          if not cur and delta < 0 and cur_idx <= #conflicts then
+            delta = delta + 1
+          end
+
+          if (delta < 0 and cur_idx < 1) or (delta > 0 and cur_idx > #conflicts) then
+            cur_idx = utils.clamp(cur_idx, 1, #conflicts)
+          end
+
+          next_idx = (cur_idx + delta - 1) % #conflicts + 1
+        end
+
         local next_conflict = conflicts[next_idx]
         local curwin = api.nvim_get_current_win()
 
@@ -182,52 +212,39 @@ function M.next_conflict()
         end)
 
         api.nvim_echo({{ ("Conflict [%d/%d]"):format(next_idx, #conflicts) }}, false, {})
+
+        return {
+          total = #conflicts,
+          current = next_idx,
+          cur_conflict = next_conflict,
+          conflicts = conflicts,
+        }
       end
     end
   end
 end
 
+---Jump to the next merge conflict marker.
+---@return diffview.ConflictCount?
+function M.next_conflict()
+  return M.jumpto_conflict(1, true)
+end
+
 ---Jump to the previous merge conflict marker.
+---@return diffview.ConflictCount?
 function M.prev_conflict()
-  local view = lib.get_current_view()
-
-  if view and view:instanceof(StandardView.__get()) then
-    ---@cast view StandardView
-    local main = view.cur_layout:get_main_win()
-    local curfile = main.file
-
-    if main:is_valid() and curfile:is_valid() then
-      local conflicts, _, cur_idx = git.parse_conflicts(
-        api.nvim_buf_get_lines(curfile.bufnr, 0, -1, false),
-        main.id
-      )
-
-      if #conflicts > 0 then
-        local prev_idx = (math.max(cur_idx, 1) - 2) % #conflicts + 1
-        local prev_conflict = conflicts[prev_idx]
-        local curwin = api.nvim_get_current_win()
-
-        api.nvim_win_call(main.id, function()
-          api.nvim_win_set_cursor(main.id, { prev_conflict.first, 0 })
-          if curwin ~= main.id then view.cur_layout:sync_scroll() end
-        end)
-
-        api.nvim_echo({{ ("Conflict [%d/%d]"):format(prev_idx, #conflicts) }}, false, {})
-      end
-    end
-  end
+  return M.jumpto_conflict(-1, true)
 end
 
 ---Execute `cmd` for each target window in the current view. If no targets
 ---are given, all windows are targeted.
 ---@param cmd string|function The vim cmd to execute, or a function.
----@param targets? { a: boolean, b: boolean, c: boolean, d: boolean } The windows to target.
 ---@return function action
-function M.view_windo(cmd, targets)
+function M.view_windo(cmd)
   local fun
 
   if type(cmd) == "string" then
-    fun = function() vim.cmd(cmd) end
+    fun = function(_, _) vim.cmd(cmd) end
   else
     fun = cmd
   end
@@ -237,13 +254,14 @@ function M.view_windo(cmd, targets)
 
     if view and view:instanceof(StandardView.__get()) then
       ---@cast view StandardView
-      targets = targets or { a = true, b = true, c = true, d = true }
 
       for _, symbol in ipairs({ "a", "b", "c", "d" }) do
         local win = view.cur_layout[symbol] --[[@as Window? ]]
 
-        if targets[symbol] and win then
-          api.nvim_win_call(win.id, fun)
+        if win then
+          api.nvim_win_call(win.id, function()
+            fun(view.cur_layout.name, symbol)
+          end)
         end
       end
     end
@@ -260,7 +278,7 @@ function M.scroll_view(distance)
     scroll_cmd = ([[exe "norm! %d%s"]]):format(distance, scroll_opr)
   else
     scroll_cmd = ([[exe "norm! " . float2nr(winheight(0) * %f) . "%s"]])
-        :format(distance, scroll_opr)
+        :format(math.abs(distance), scroll_opr)
   end
 
   return function()
@@ -272,9 +290,9 @@ function M.scroll_view(distance)
       local target
 
       for _, win in ipairs(view.cur_layout.windows) do
-        local c = api.nvim_buf_line_count(api.nvim_win_get_buf(win.id))
-        if c > max then
-          max = c
+        local height = utils.win_content_height(win.id)
+        if height > max then
+          max = height
           target = win.id
         end
       end
@@ -323,6 +341,75 @@ local function diff_copy_target(kind)
   end
 end
 
+---@param view DiffView
+---@param target "ours"|"theirs"|"base"|"all"|"none"
+local function resolve_all_conflicts(view, target)
+  local main = view.cur_layout:get_main_win()
+  local curfile = main.file
+
+  if main:is_valid() and curfile:is_valid() then
+    local lines = api.nvim_buf_get_lines(curfile.bufnr, 0, -1, false)
+    local conflicts = vcs_utils.parse_conflicts(lines, main.id)
+
+    if next(conflicts) then
+      local content
+      local offset = 0
+      local first, last
+
+      for _, cur_conflict in ipairs(conflicts) do
+        -- add offset to line numbers
+        first = cur_conflict.first + offset
+        last = cur_conflict.last + offset
+
+        if target == "ours" then content = cur_conflict.ours.content
+        elseif target == "theirs" then content = cur_conflict.theirs.content
+        elseif target == "base" then content = cur_conflict.base.content
+        elseif target == "all" then
+          content = utils.vec_join(
+            cur_conflict.ours.content,
+            cur_conflict.base.content,
+            cur_conflict.theirs.content
+          )
+        end
+
+        content = content or {}
+        api.nvim_buf_set_lines(curfile.bufnr, first - 1, last, false, content)
+        offset = offset + (#content - (last - first) - 1)
+      end
+
+      utils.set_cursor(main.id, unpack({
+        (content and #content or 0) + first - 1,
+        content and content[1] and #content[#content] or 0
+      }))
+
+      view.cur_layout:sync_scroll()
+    end
+  end
+end
+
+---@param target "ours"|"theirs"|"base"|"all"|"none"
+function M.conflict_choose_all(target)
+  return async.void(function()
+    local view = lib.get_current_view() --[[@as DiffView ]]
+
+    if (view and view:instanceof(DiffView.__get())) then
+      ---@cast view DiffView
+
+      if view.panel:is_focused() then
+        local item = view:infer_cur_file(false) ---@cast item -DirData
+        if not item then return end
+
+        if not item.active then
+          -- Open the entry
+          await(view:set_file(item))
+        end
+      end
+
+      resolve_all_conflicts(view, target)
+    end
+  end)
+end
+
 ---@param target "ours"|"theirs"|"base"|"all"|"none"
 function M.conflict_choose(target)
   return function()
@@ -334,7 +421,7 @@ function M.conflict_choose(target)
       local curfile = main.file
 
       if main:is_valid() and curfile:is_valid() then
-        local _, cur = git.parse_conflicts(
+        local _, cur = vcs_utils.parse_conflicts(
           api.nvim_buf_get_lines(curfile.bufnr, 0, -1, false),
           main.id
         )
@@ -444,7 +531,7 @@ function M.cycle_layout()
 
   for _, entry in ipairs(files) do
     local cur_layout = entry.layout
-    local next_layout = layouts[utils.vec_indexof(layouts, cur_layout:class()) % #layouts + 1]
+    local next_layout = layouts[utils.vec_indexof(layouts, cur_layout.class) % #layouts + 1]
     entry:convert_layout(next_layout)
   end
 
@@ -465,9 +552,71 @@ function M.cycle_layout()
   end
 end
 
+---@param keymap_groups string|string[]
+function M.help(keymap_groups)
+  keymap_groups = type(keymap_groups) == "table" and keymap_groups or { keymap_groups }
+
+  return function()
+    local view = lib.get_current_view()
+
+    if view then
+      local help_panel = HelpPanel(view, keymap_groups) --[[@as HelpPanel ]]
+      help_panel:focus()
+    end
+  end
+end
+
+do
+  M.compat.fold_cmds = {}
+
+  -- For file entries that use custom folds with `foldmethod=manual` we need to
+  -- replicate fold commands in all diff windows, as folds are only
+  -- synchronized between diff windows when `foldmethod=diff`.
+  local function compat_fold(fold_cmd)
+    return function()
+      if vim.wo.foldmethod ~= "manual" then
+        local ok, msg = pcall(vim.cmd, "norm! " .. fold_cmd)
+        if not ok and msg then
+          api.nvim_err_writeln(msg)
+        end
+        return
+      end
+
+      local view = lib.get_current_view()
+
+      if view and view:instanceof(StandardView.__get()) then
+        ---@cast view StandardView
+        local err
+
+        for _, win in ipairs(view.cur_layout.windows) do
+          api.nvim_win_call(win.id, function()
+            local ok, msg = pcall(vim.cmd, "norm! " .. fold_cmd)
+            if not ok then err = msg end
+          end)
+        end
+
+        if err then api.nvim_err_writeln(err) end
+      end
+    end
+  end
+
+  for _, fold_cmd in ipairs({
+    "za", "zA", "ze", "zE", "zo", "zc", "zO", "zC", "zr", "zm", "zR", "zM",
+    "zv", "zx", "zX", "zn", "zN", "zi",
+  }) do
+    table.insert(M.compat.fold_cmds, {
+      "n",
+      fold_cmd,
+      compat_fold(fold_cmd),
+      { desc = "diffview_ignore" },
+    })
+  end
+end
+
 local action_names = {
   "close",
   "close_all_folds",
+  "close_fold",
   "copy_hash",
   "focus_entry",
   "focus_files",
@@ -475,6 +624,7 @@ local action_names = {
   "next_entry",
   "open_all_folds",
   "open_commit_log",
+  "open_fold",
   "open_in_diffview",
   "options",
   "prev_entry",
@@ -486,6 +636,7 @@ local action_names = {
   "stage_all",
   "toggle_files",
   "toggle_flatten_dirs",
+  "toggle_fold",
   "toggle_stage_entry",
   "unstage_all",
 }

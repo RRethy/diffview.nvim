@@ -1,15 +1,16 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 
 local DiffView = lazy.access("diffview.scene.views.diff.diff_view", "DiffView") ---@type DiffView|LazyModule
 local FileEntry = lazy.access("diffview.scene.file_entry", "FileEntry") ---@type FileEntry|LazyModule
 local FilePanel = lazy.access("diffview.scene.views.diff.file_panel", "FilePanel") ---@type FilePanel|LazyModule
-local Rev = lazy.access("diffview.git.rev", "Rev") ---@type Rev|LazyModule
-local RevType = lazy.access("diffview.git.rev", "RevType") ---@type RevType|LazyModule
-local async = lazy.require("plenary.async") ---@module "plenary.async"
-local git = lazy.require("diffview.git.utils") ---@module "diffview.git.utils"
-local logger = lazy.require("diffview.logger") ---@module "diffview.logger"
+local Rev = lazy.access("diffview.vcs.adapters.git.rev", "GitRev") ---@type GitRev|LazyModule
+local RevType = lazy.access("diffview.vcs.rev", "RevType") ---@type RevType|LazyModule
+local vcs_utils = lazy.require("diffview.vcs") ---@module "diffview.vcs"
 local oop = lazy.require("diffview.oop") ---@module "diffview.oop"
 local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+
+local logger = DiffviewGlobal.logger
 
 local M = {}
 
@@ -31,17 +32,20 @@ local CDiffView = oop.create_class("CDiffView", DiffView.__get())
 ---CDiffView constructor.
 ---@param opt any
 function CDiffView:init(opt)
-  logger.info("[api] Creating a new Custom DiffView.")
+  logger:info("[api] Creating a new Custom DiffView.")
   self.valid = false
-  local git_dir = git.git_dir(opt.git_root)
 
-  if not git_dir then
+  local err, adapter = vcs_utils.get_adapter({ top_indicators = { opt.git_root } })
+
+  if err then
     utils.err(
-      ("Failed to find the git dir for the repository: %s")
+      ("Failed to create an adapter for the repository: %s")
       :format(utils.str_quote(opt.git_root))
     )
     return
   end
+
+  ---@cast adapter -?
 
   -- Fix malformed revs
   for _, v in ipairs({ "left", "right" }) do
@@ -54,18 +58,13 @@ function CDiffView:init(opt)
   self.fetch_files = opt.update_files
   self.get_file_data = opt.get_file_data
 
-  local git_ctx = {
-    toplevel = opt.git_root,
-    dir = git_dir,
-  }
-
-  CDiffView:super().init(self, vim.tbl_extend("force", opt, {
-    git_ctx = git_ctx,
+  self:super(vim.tbl_extend("force", opt, {
+    adapter = adapter,
     panel = FilePanel(
-      git_ctx,
+      adapter,
       self.files,
       self.path_args,
-      self.rev_arg or git.rev_to_pretty_string(opt.left, opt.right)
+      self.rev_arg or adapter:rev_to_pretty_string(opt.left, opt.right)
     ),
   }))
 
@@ -92,7 +91,6 @@ end
 ---@override
 CDiffView.get_updated_files = async.wrap(function(self, callback)
   local err
-  callback = async.void(callback)
 
   repeat
     local ok, new_files = pcall(self.fetch_files, self)
@@ -115,9 +113,9 @@ CDiffView.get_updated_files = async.wrap(function(self, callback)
   until true
 
   utils.err(err, true)
-  logger.s_error(table.concat(err, "\n"))
+  logger:error(table.concat(err, "\n"))
   callback(err, nil)
-end, 2)
+end)
 
 function CDiffView:create_file_entries(files)
   local entries = {}
@@ -128,7 +126,7 @@ function CDiffView:create_file_entries(files)
     {
       kind = "staged",
       files = files.staged or {},
-      left = git.head_rev(self.git_ctx.toplevel),
+      left = self.adapter:head_rev(),
       right = Rev(RevType.STAGE, 0),
     },
   }
@@ -139,27 +137,30 @@ function CDiffView:create_file_entries(files)
     for _, file_data in ipairs(v.files) do
       if v.kind == "conflicting" then
         table.insert(entries[v.kind], FileEntry.with_layout(CDiffView.get_default_merge_layout(), {
-          git_ctx = self.git_ctx,
+          adapter = self.adapter,
           path = file_data.path,
           oldpath = file_data.oldpath,
           status = "U",
           kind = "conflicting",
-          rev_ours = Rev(RevType.STAGE, 2),
-          rev_main = Rev(RevType.LOCAL),
-          rev_theirs = Rev(RevType.STAGE, 3),
-          rev_base = Rev(RevType.STAGE, 1),
-          get_data = self.get_file_data,
+          revs = {
+            a = Rev(RevType.STAGE, 2),
+            b = Rev(RevType.LOCAL),
+            c = Rev(RevType.STAGE, 3),
+            d = Rev(RevType.STAGE, 1),
+          },
         }))
       else
-        table.insert(entries[v.kind], FileEntry.for_d2(CDiffView.get_default_diff2(), {
-          git_ctx = self.git_ctx,
+        table.insert(entries[v.kind], FileEntry.with_layout(CDiffView.get_default_layout(), {
+          adapter = self.adapter,
           path = file_data.path,
           oldpath = file_data.oldpath,
           status = file_data.status,
           stats = file_data.stats,
           kind = v.kind,
-          rev_a = v.left,
-          rev_b = v.right,
+          revs = {
+            a = v.left,
+            b = v.right,
+          },
           get_data = self.get_file_data,
           --FIXME: left_null, right_null
         }))

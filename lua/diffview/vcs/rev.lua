@@ -1,23 +1,13 @@
-local lazy = require("diffview.lazy")
 local oop = require("diffview.oop")
-
----@module "diffview.git.utils"
-local git = lazy.require("diffview.git.utils")
 
 local M = {}
 
----@class RevType : EnumValue
-
----@class ERevType
----@field LOCAL RevType
----@field COMMIT RevType
----@field STAGE RevType
----@field CUSTOM RevType
+---@enum RevType
 local RevType = oop.enum({
-  "LOCAL",
-  "COMMIT",
-  "STAGE",
-  "CUSTOM",
+  LOCAL   = 1,
+  COMMIT  = 2,
+  STAGE   = 3,
+  CUSTOM  = 4,
 })
 
 ---@alias RevRange { first: Rev, last: Rev }
@@ -28,9 +18,6 @@ local RevType = oop.enum({
 ---@field stage? integer A stage number.
 ---@field track_head boolean If true, indicates that the rev should be updated when HEAD changes.
 local Rev = oop.create_class("Rev")
-
--- The special SHA for git's empty tree.
-Rev.NULL_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 ---Rev constructor
 ---@param rev_type RevType
@@ -77,40 +64,50 @@ function Rev:__tostring()
   end
 end
 
+---@diagnostic disable: unused-local, missing-return
+
+---Get the argument describing the range between the two given revs. If a
+---single rev is given, the returned argument describes the *range* of the
+---single commit pointed to by that rev.
+---@abstract
+---@param rev_from Rev|string
+---@param rev_to? Rev|string
+---@return string?
+function Rev.to_range(rev_from, rev_to) oop.abstract_stub() end
+
 ---@param name string
----@param git_toplevel? string
+---@param adapter? VCSAdapter
 ---@return Rev?
-function Rev.from_name(name, git_toplevel)
-  local out, code = git.exec_sync({ "rev-parse", "--revs-only", name }, git_toplevel)
-
-  if code ~= 0 then
-    return
-  end
-
-  return Rev(RevType.COMMIT, out[1]:gsub("^%^", ""))
+function Rev.from_name(name, adapter)
+  oop.abstract_stub()
 end
 
----@param git_toplevel string
+---@param adapter VCSAdapter
 ---@return Rev?
-function Rev.earliest_commit(git_toplevel)
-  local out, code = git.exec_sync({
-    "rev-list", "--max-parents=0", "--first-parent", "HEAD"
-  }, git_toplevel)
-
-  if code ~= 0 then
-    return
-  end
-
-  return Rev(RevType.COMMIT, ({ out[1]:gsub("^%^", "") })[1])
+function Rev.earliest_commit(adapter)
+  oop.abstract_stub()
 end
 
-function Rev:object_name()
-  if self.type == RevType.COMMIT then
-    return self.commit
-  elseif self.type == RevType.STAGE then
-    return ":" ..  self.stage
-  end
+---Create a new commit rev with the special empty tree SHA.
+---@return Rev
+function Rev.new_null_tree()
+  oop.abstract_stub()
 end
+
+---Determine if this rev is currently the head.
+---@param adapter VCSAdapter
+---@return boolean?
+function Rev:is_head(adapter)
+  oop.abstract_stub()
+end
+
+---@param abbrev_len? integer
+---@return string
+function Rev:object_name(abbrev_len)
+  oop.abstract_stub()
+end
+
+---@diagnostic enable: unused-local, missing-return
 
 ---Get an abbreviated commit SHA. Returns `nil` if this Rev is not a commit.
 ---@param length integer|nil
@@ -120,29 +117,6 @@ function Rev:abbrev(length)
     return self.commit:sub(1, length or 7)
   end
   return nil
-end
-
----Determine if this rev is currently the head.
----@param git_toplevel string
----@return boolean?
-function Rev:is_head(git_toplevel)
-  if not self.type == RevType.COMMIT then
-    return false
-  end
-
-  local out, code = git.exec_sync({ "rev-parse", "HEAD", "--" }, git_toplevel)
-
-  if code ~= 0 or not (out[2] ~= nil or out[1] and out[1] ~= "") then
-    return
-  end
-
-  return self.commit == vim.trim(out[1]):gsub("^%^", "")
-end
-
----Create a new commit rev with the special empty tree SHA.
----@return Rev
-function Rev.new_null_tree()
-  return Rev(RevType.COMMIT, Rev.NULL_TREE_SHA)
 end
 
 M.RevType = RevType

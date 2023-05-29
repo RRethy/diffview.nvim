@@ -5,69 +5,17 @@ end
 local hl = require("diffview.hl")
 local lazy = require("diffview.lazy")
 
----@module "diffview.arg_parser"
-local arg_parser = lazy.require("diffview.arg_parser")
----@module "diffview.config"
-local config = lazy.require("diffview.config")
----@module "diffview.git.utils"
-local git = lazy.require("diffview.git.utils")
----@module "diffview.lib"
-local lib = lazy.require("diffview.lib")
----@module "diffview.logger"
-local logger = lazy.require("diffview.logger")
----@module "diffview.utils"
-local utils = lazy.require("diffview.utils")
+local arg_parser = lazy.require("diffview.arg_parser") ---@module "diffview.arg_parser"
+local config = lazy.require("diffview.config") ---@module "diffview.config"
+local lib = lazy.require("diffview.lib") ---@module "diffview.lib"
+local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+local vcs = lazy.require("diffview.vcs") ---@module "diffview.vcs"
 
 local api = vim.api
+local logger = DiffviewGlobal.logger
+local pl = lazy.access(utils, "path") ---@type PathLib
 
 local M = {}
-
----@type FlagValueMap
-local comp_open = arg_parser.FlagValueMap()
-comp_open:put({ "u", "untracked-files" }, { "true", "normal", "all", "false", "no" })
-comp_open:put({ "cached", "staged" })
-comp_open:put({ "imply-local" })
-comp_open:put({ "C" }, function(_, arg_lead)
-  return vim.fn.getcompletion(arg_lead, "dir")
-end)
-comp_open:put({ "selected-file" }, function (_, arg_lead)
-  return vim.fn.getcompletion(arg_lead, "file")
-end)
-
----@type FlagValueMap
-local comp_file_history = arg_parser.FlagValueMap()
-comp_file_history:put({ "base" }, function(_, arg_lead)
-  return utils.vec_join("LOCAL", M.rev_completion(arg_lead))
-end)
-comp_file_history:put({ "range" }, function(_, arg_lead)
-  return M.rev_completion(arg_lead, { accept_range = true })
-end)
-comp_file_history:put({ "C" }, function(_, arg_lead)
-  return vim.fn.getcompletion(arg_lead, "dir")
-end)
-comp_file_history:put({ "--follow" })
-comp_file_history:put({ "--first-parent" })
-comp_file_history:put({ "--show-pulls" })
-comp_file_history:put({ "--reflog" })
-comp_file_history:put({ "--all" })
-comp_file_history:put({ "--merges" })
-comp_file_history:put({ "--no-merges" })
-comp_file_history:put({ "--reverse" })
-comp_file_history:put({ "--max-count", "-n" }, {})
-comp_file_history:put({ "-L" }, function (_, arg_lead)
-  return M.line_trace_completion(arg_lead)
-end)
-comp_file_history:put({ "--diff-merges" }, {
-  "off",
-  "on",
-  "first-parent",
-  "separate",
-  "combined",
-  "dense-combined",
-  "remerge",
-})
-comp_file_history:put({ "--author" }, {})
-comp_file_history:put({ "--grep" }, {})
 
 function M.setup(user_config)
   config.setup(user_config or {})
@@ -142,6 +90,9 @@ function M.init()
   DiffviewGlobal.emitter:on("view_leave", function(_)
     api.nvim_exec_autocmds("User", { pattern = "DiffviewViewLeave", modeline = false })
   end)
+  DiffviewGlobal.emitter:on("view_post_layout", function(_)
+    api.nvim_exec_autocmds("User", { pattern = "DiffviewViewPostLayout", modeline = false })
+  end)
   DiffviewGlobal.emitter:on("diff_buf_read", function(_)
     api.nvim_exec_autocmds("User", { pattern = "DiffviewDiffBufRead", modeline = false })
   end)
@@ -158,16 +109,18 @@ function M.init()
   ]])
 end
 
-function M.open(...)
-  local view = lib.diffview_open(utils.tbl_pack(...))
+---@param args string[]
+function M.open(args)
+  local view = lib.diffview_open(args)
   if view then
     view:open()
   end
 end
 
 ---@param range? { [1]: integer, [2]: integer }
-function M.file_history(range, ...)
-  local view = lib.file_history(range, utils.tbl_pack(...))
+---@param args string[]
+function M.file_history(range, args)
+  local view = lib.file_history(range, args)
   if view then
     view:open()
   end
@@ -188,147 +141,40 @@ function M.close(tabpage)
   end
 end
 
----@param arg_lead string
----@param items string[]
----@return string[]
-function M.filter_completion(arg_lead, items)
-  arg_lead, _ = vim.pesc(arg_lead)
-  return vim.tbl_filter(function(item)
-    return item:match(arg_lead)
-  end, items)
-end
-
 function M.completion(_, cmd_line, cur_pos)
-  local ctx = arg_parser.scan_ex_args(cmd_line, cur_pos)
+  local ctx = arg_parser.scan(cmd_line, { cur_pos = cur_pos, allow_ex_range = true })
   local cmd = ctx.args[1]
 
   if cmd and M.completers[cmd] then
-    return M.filter_completion(ctx.arg_lead, M.completers[cmd](ctx))
+    return arg_parser.process_candidates(M.completers[cmd](ctx), ctx)
   end
 end
 
-function M.rev_candidates(git_toplevel, git_dir)
-  logger.lvl(1).debug("[completion] Revision candidates requested.")
-  local top_indicators
-  if not (git_toplevel and git_dir) then
-    local cfile = utils.path:vim_expand("%")
-    top_indicators = utils.vec_join(
+---Create a temporary adapter to get relevant completions
+---@return VCSAdapter?
+function M.get_adapter()
+    local cfile = pl:vim_expand("%")
+    local top_indicators = utils.vec_join(
       vim.bo.buftype == ""
-          and utils.path:absolute(cfile)
+          and pl:absolute(cfile)
           or nil,
-      utils.path:realpath(".")
+      pl:realpath(".")
     )
-  end
 
-  if not (git_toplevel and git_dir) then
-    local err
-    err, git_toplevel = lib.find_git_toplevel(top_indicators)
+    local err, adapter = vcs.get_adapter({ top_indicators = top_indicators })
 
     if err then
-      return {}
+      logger:warn("[completion] Failed to create adapter: " .. err)
     end
 
-    ---@cast git_toplevel string
-    git_dir = git.git_dir(git_toplevel)
-  end
-
-  if not (git_toplevel and git_dir) then
-    return {}
-  end
-
-  -- stylua: ignore start
-  local targets = {
-    "HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD",
-    "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"
-  }
-  -- stylua: ignore end
-
-  local heads = vim.tbl_filter(
-    function(name) return vim.tbl_contains(targets, name) end,
-    vim.tbl_map(
-      function(v) return utils.path:basename(v) end,
-      vim.fn.glob(git_dir .. "/*", false, true)
-    )
-  )
-  local revs = git.exec_sync(
-    { "rev-parse", "--symbolic", "--branches", "--tags", "--remotes" },
-    { cwd = git_toplevel, silent = true }
-  )
-  local stashes = git.exec_sync(
-    { "stash", "list", "--pretty=format:%gd" },
-    { cwd = git_toplevel, silent = true }
-  )
-
-  return utils.vec_join(heads, revs, stashes)
-end
-
----@class RevCompletionSpec
----@field accept_range boolean
----@field git_toplevel string
----@field git_dir string
-
----Completion for git revisions.
----@param arg_lead string
----@param opt? RevCompletionSpec
----@return string[]
-function M.rev_completion(arg_lead, opt)
-  ---@type RevCompletionSpec
-  opt = vim.tbl_extend("keep", opt or {}, { accept_range = false })
-  local candidates = M.rev_candidates(opt.git_toplevel, opt.git_dir)
-  local _, range_end = utils.str_match(arg_lead, {
-    "^(%.%.%.?)()$",
-    "^(%.%.%.?)()[^.]",
-    "[^.](%.%.%.?)()$",
-    "[^.](%.%.%.?)()[^.]",
-  })
-
-  if opt.accept_range and range_end then
-    local range_lead = arg_lead:sub(1, range_end - 1)
-    candidates = vim.tbl_map(function(v)
-      return range_lead .. v
-    end, candidates)
-  end
-
-  return M.filter_completion(arg_lead, candidates)
-end
-
----Completion for the git-log `-L` flag.
----@param arg_lead string
----@return string[]?
-function M.line_trace_completion(arg_lead)
-  local range_end = arg_lead:match(".*:()")
-
-  if not range_end then
-    return
-  else
-    local lead = arg_lead:sub(1, range_end - 1)
-    local path_lead = arg_lead:sub(range_end)
-
-    return vim.tbl_map(function(v)
-      return lead .. v
-    end, vim.fn.getcompletion(path_lead, "file"))
-  end
+    return adapter
 end
 
 M.completers = {
   ---@param ctx CmdLineContext
   DiffviewOpen = function(ctx)
-    local cfile = utils.path:vim_expand("%")
-    local top_indicators = utils.vec_join(
-      vim.bo.buftype == ""
-          and utils.path:absolute(cfile)
-          or nil,
-      utils.path:realpath(".")
-    )
-
     local has_rev_arg = false
-    local git_dir
-    local err, git_toplevel = lib.find_git_toplevel(top_indicators)
-
-    if not err then
-      ---@cast git_toplevel string
-      git_dir = git.git_dir(git_toplevel)
-    end
+    local adapter = M.get_adapter()
 
     for i = 2, math.min(#ctx.args, ctx.divideridx) do
       if ctx.args[i]:sub(1, 1) ~= "-" and i ~= ctx.argidx then
@@ -340,33 +186,41 @@ M.completers = {
     local candidates = {}
 
     if ctx.argidx > ctx.divideridx then
-      utils.vec_push(candidates, unpack(vim.fn.getcompletion(ctx.arg_lead, "file", 0)))
-    elseif not has_rev_arg and ctx.arg_lead:sub(1, 1) ~= "-" and git_dir and git_toplevel then
-      utils.vec_push(candidates, unpack(comp_open:get_all_names()))
-      utils.vec_push(candidates, unpack(M.rev_completion(ctx.arg_lead, {
-        accept_range= true,
-        git_toplevel = git_toplevel,
-        git_dir = git_dir,
-      })))
-    else
-      utils.vec_push(candidates, unpack(
-        comp_open:get_completion(ctx.arg_lead)
-        or comp_open:get_all_names()
-      ))
+      if adapter then
+        utils.vec_push(candidates, unpack(adapter:path_candidates(ctx.arg_lead)))
+      else
+        utils.vec_push(candidates, unpack(vim.fn.getcompletion(ctx.arg_lead, "file", 0)))
+      end
+    elseif adapter then
+      if not has_rev_arg and ctx.arg_lead:sub(1, 1) ~= "-" then
+        utils.vec_push(candidates, unpack(adapter.comp.open:get_all_names()))
+        utils.vec_push(candidates, unpack(adapter:rev_candidates(ctx.arg_lead, {
+          accept_range = true,
+        })))
+      else
+        utils.vec_push(candidates, unpack(
+          adapter.comp.open:get_completion(ctx.arg_lead)
+          or adapter.comp.open:get_all_names()
+        ))
+      end
     end
 
     return candidates
   end,
   ---@param ctx CmdLineContext
   DiffviewFileHistory = function(ctx)
+    local adapter = M.get_adapter()
     local candidates = {}
 
-    utils.vec_push(candidates, unpack(
-      comp_file_history:get_completion(ctx.arg_lead)
-      or comp_file_history:get_all_names()
-    ))
-
-    utils.vec_push(candidates, unpack(vim.fn.getcompletion(ctx.arg_lead, "file", 0)))
+    if adapter then
+      utils.vec_push(candidates, unpack(
+        adapter.comp.file_history:get_completion(ctx.arg_lead)
+        or adapter.comp.file_history:get_all_names()
+      ))
+      utils.vec_push(candidates, unpack(adapter:path_candidates(ctx.arg_lead)))
+    else
+      utils.vec_push(candidates, unpack(vim.fn.getcompletion(ctx.arg_lead, "file", 0)))
+    end
 
     return candidates
   end,

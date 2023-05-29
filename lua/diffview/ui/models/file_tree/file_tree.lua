@@ -3,12 +3,14 @@ local utils = require("diffview.utils")
 local Node = require("diffview.ui.models.file_tree.node").Node
 local Model = require("diffview.ui.model").Model
 
+local pl = utils.path
+
 local M = {}
 
 ---@class DirData
 ---@field name string
 ---@field path string
----@field kind git.FileKind
+---@field kind vcs.FileKind
 ---@field collapsed boolean
 ---@field status string
 ---@field _node Node
@@ -18,18 +20,18 @@ local M = {}
 local FileTree = oop.create_class("FileTree", Model)
 
 ---FileTree constructor
----@param files FileEntry[]|nil
+---@param files FileEntry[]?
 function FileTree:init(files)
   self.root = Node("__ROOT__")
 
-  for _, file in ipairs(files) do
+  for _, file in ipairs(files or {}) do
     self:add_file_entry(file)
   end
 end
 
 ---@param file FileEntry
 function FileTree:add_file_entry(file)
-  local parts = utils.path:explode(file.path)
+  local parts = pl:explode(file.path)
   local cur_node = self.root
 
   local path = parts[1]
@@ -39,7 +41,7 @@ function FileTree:add_file_entry(file)
     local name = parts[i]
 
     if i > 1 then
-      path = utils.path:join(path, parts[i])
+      path = pl:join(path, parts[i])
     end
 
     if not cur_node.children[name] then
@@ -116,7 +118,7 @@ function FileTree:create_comp_schema(data)
         ---@type DirData
         local subdir_data = node.children[1].data
         dir_data = {
-          name = utils.path:join(dir_data.name, subdir_data.name),
+          name = pl:join(dir_data.name, subdir_data.name),
           path = subdir_data.path,
           kind = subdir_data.kind,
           collapsed = dir_data.collapsed and subdir_data.collapsed,
@@ -127,14 +129,17 @@ function FileTree:create_comp_schema(data)
       end
     end
 
+    local items = { name = "items" }
     local struct = {
-      name = "wrapper",
-      { name = "directory", context = dir_data },
+      name = "directory",
+      context = dir_data,
+      { name = "dir_name" },
+      items,
     }
     parent[#parent + 1] = struct
 
     for _, child in ipairs(node.children) do
-      recurse(struct, child)
+      recurse(items, child)
     end
   end
 

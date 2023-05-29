@@ -1,13 +1,14 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 
+local EventName = lazy.access("diffview.events", "EventName") ---@type EventName|LazyModule
+local RevType = lazy.access("diffview.vcs.rev", "RevType") ---@type RevType|LazyModule
 local actions = lazy.require("diffview.actions") ---@module "diffview.actions"
-local Event = lazy.access("diffview.events", "Event") ---@type EEvent
-local RevType = lazy.access("diffview.git.rev", "RevType") ---@type ERevType
-local async = lazy.require("plenary.async") ---@module "plenary.async"
-local git = lazy.require("diffview.git.utils") ---@module "diffview.git.utils"
 local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+local vcs_utils = lazy.require("diffview.vcs.utils") ---@module "diffview.vcs.utils"
 
 local api = vim.api
+local await = async.await
 
 ---@param view DiffView
 return function(view)
@@ -29,30 +30,32 @@ return function(view)
         file.layout:detach_files()
       end
 
-      for _, f in view.panel.files:ipairs() do
+      for _, f in view.panel.files:iter() do
         f.layout:restore_winopts()
       end
     end,
     buf_write_post = function()
-      if git.has_local(view.left, view.right) then
+      if view.adapter:has_local(view.left, view.right) then
         view.update_needed = true
         if api.nvim_get_current_tabpage() == view.tabpage then
           view:update_files()
         end
       end
     end,
-    diff_buf_read = function(_)
-      utils.set_cursor(0, 1, 0)
+    file_open_new = function(_, entry)
+      api.nvim_win_call(view.cur_layout:get_main_win().id, function()
+        utils.set_cursor(0, 1, 0)
 
-      if view.cur_layout:get_main_win().id == api.nvim_get_current_win() then
         if view.cur_entry and view.cur_entry.kind == "conflicting" then
           actions.next_conflict()
           vim.cmd("norm! zz")
         end
-      end
+      end)
+
+      view.cur_layout:sync_scroll()
     end,
     ---@diagnostic disable-next-line: unused-local
-    files_updated = function(files)
+    files_updated = function(_, files)
       view.initialized = true
     end,
     close = function()
@@ -101,18 +104,16 @@ return function(view)
       end
     end,
     open_commit_log = function()
-      if (view.left.type == RevType.STAGE and view.right.type == RevType.LOCAL)
-        or (
-          view.left.type == RevType.COMMIT
-          and vim.tbl_contains({ RevType.STAGE, RevType.LOCAL }, view.right.type)
-          and view.left:is_head(view.git_ctx.toplevel)
-        ) then
+      if view.left.type == RevType.STAGE and view.right.type == RevType.LOCAL then
         utils.info("Changes not commited yet. No log available for these changes.")
         return
       end
 
-      local rev_arg = ("%s..%s"):format(view.left.commit, view.right.commit or "HEAD")
-      view.commit_log_panel:update(rev_arg)
+      local range = view.adapter.Rev.to_range(view.left, view.right)
+
+      if range then
+        view.commit_log_panel:update(range)
+      end
     end,
     toggle_stage_entry = function()
       if not (view.left.type == RevType.STAGE and view.right.type == RevType.LOCAL) then
@@ -121,14 +122,14 @@ return function(view)
 
       local item = view:infer_cur_file(true)
       if item then
-        local code
+        local success
         if item.kind == "working" or item.kind == "conflicting" then
-          _, code = git.exec_sync({ "add", item.path }, view.git_ctx.toplevel)
+          success = view.adapter:add_files({item.path})
         elseif item.kind == "staged" then
-          _, code = git.exec_sync({ "reset", "--", item.path }, view.git_ctx.toplevel)
+          success = view.adapter:reset_files({item.path})
         end
 
-        if code ~= 0 then
+        if not success then
           utils.err(("Failed to stage/unstage file: '%s'"):format(item.path))
           return
         end
@@ -168,21 +169,23 @@ return function(view)
           view:next_file()
         end
 
-        view:update_files(function()
-          view.panel:highlight_cur_file()
-        end)
-        view.emitter:emit(Event.FILES_STAGED, view)
+        view:update_files(
+          vim.schedule_wrap(function()
+            view.panel:highlight_cur_file()
+          end)
+        )
+        view.emitter:emit(EventName.FILES_STAGED, view)
       end
     end,
     stage_all = function()
       local args = vim.tbl_map(function(file)
         return file.path
-      end, view.files.working)
+      end, utils.vec_join(view.files.working, view.files.conflicting))
 
       if #args > 0 then
-        local _, code = git.exec_sync({ "add", args }, view.git_ctx.toplevel)
+        local success = view.adapter:add_files(args)
 
-        if code ~= 0 then
+        if not success then
           utils.err("Failed to stage files!")
           return
         end
@@ -190,41 +193,45 @@ return function(view)
         view:update_files(function()
           view.panel:highlight_cur_file()
         end)
-        view.emitter:emit(Event.FILES_STAGED, view)
+        view.emitter:emit(EventName.FILES_STAGED, view)
       end
     end,
     unstage_all = function()
-      local _, code = git.exec_sync({ "reset" }, view.git_ctx.toplevel)
+      local success = view.adapter:reset_files()
 
-      if code ~= 0 then
+      if not success then
         utils.err("Failed to unstage files!")
         return
       end
 
       view:update_files()
-      view.emitter:emit(Event.FILES_STAGED, view)
+      view.emitter:emit(EventName.FILES_STAGED, view)
     end,
     restore_entry = async.void(function()
-      local commit
-      if not (view.right.type == RevType.LOCAL) then
+      if view.right.type ~= RevType.LOCAL then
         utils.err("The right side of the diff is not local! Aborting file restoration.")
         return
       end
-      if not (view.left.type == RevType.STAGE) then
+
+      local commit
+
+      if view.left.type ~= RevType.STAGE then
         commit = view.left.commit
       end
+
       local file = view:infer_cur_file()
-      if file then
-        local bufid = utils.find_file_buffer(file.path)
-        if bufid and vim.bo[bufid].modified then
-          utils.err("The file is open with unsaved changes! Aborting file restoration.")
-          return
-        end
-        git.restore_file(view.git_ctx.toplevel, file.path, file.kind, commit, function()
-          async.util.scheduler()
-          view:update_files()
-        end)
+      if not file then return end
+
+      local bufid = utils.find_file_buffer(file.path)
+
+      if bufid and vim.bo[bufid].modified then
+        utils.err("The file is open with unsaved changes! Aborting file restoration.")
+        return
       end
+
+      vcs_utils.restore_file(view.adapter, file.path, file.kind, commit, function()
+        view:update_files()
+      end)
     end),
     listing_style = function()
       if view.panel.listing_style == "list" then
@@ -250,6 +257,66 @@ return function(view)
     end,
     refresh_files = function()
       view:update_files()
+    end,
+    open_all_folds = function()
+      if not view.panel:is_focused() or view.panel.listing_style ~= "tree" then return end
+
+      for _, file_set in ipairs({
+        view.panel.components.conflicting.files,
+        view.panel.components.working.files,
+        view.panel.components.staged.files,
+      }) do
+        file_set.comp:deep_some(function(comp, _, _)
+          if comp.name == "directory" then
+            (comp.context --[[@as DirData ]]).collapsed = false
+          end
+        end)
+      end
+
+      view.panel:render()
+      view.panel:redraw()
+    end,
+    close_all_folds = function()
+      if not view.panel:is_focused() or view.panel.listing_style ~= "tree" then return end
+
+      for _, file_set in ipairs({
+        view.panel.components.conflicting.files,
+        view.panel.components.working.files,
+        view.panel.components.staged.files,
+      }) do
+        file_set.comp:deep_some(function(comp, _, _)
+          if comp.name == "directory" then
+            (comp.context --[[@as DirData ]]).collapsed = true
+          end
+        end)
+      end
+
+      view.panel:render()
+      view.panel:redraw()
+    end,
+    open_fold = function()
+      if not view.panel:is_focused() then return end
+      local dir = view.panel:get_dir_at_cursor()
+      if dir then view.panel:set_item_fold(dir, true) end
+    end,
+    close_fold = function()
+      if not view.panel:is_focused() then return end
+      local dir, comp = view.panel:get_dir_at_cursor()
+      if dir and comp then
+        if not dir.collapsed then
+          view.panel:set_item_fold(dir, false)
+        else
+          local dir_parent = utils.tbl_access(comp, "parent.parent")
+          if dir_parent and dir_parent.name == "directory" then
+            view.panel:set_item_fold(dir_parent.context, false)
+          end
+        end
+      end
+    end,
+    toggle_fold = function()
+      if not view.panel:is_focused() then return end
+      local dir = view.panel:get_dir_at_cursor()
+      if dir then view.panel:toggle_item_fold(dir) end
     end,
   }
 end

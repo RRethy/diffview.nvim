@@ -1,8 +1,11 @@
+local async = require("diffview.async")
 local Window = require("diffview.scene.window").Window
 local Diff2 = require("diffview.scene.layouts.diff_2").Diff2
 local oop = require("diffview.oop")
 
 local api = vim.api
+local await = async.await
+
 local M = {}
 
 ---@class Diff2Ver : Diff2
@@ -10,21 +13,24 @@ local M = {}
 ---@field b Window
 local Diff2Ver = oop.create_class("Diff2Ver", Diff2)
 
----@class Diff2Hor.init.Opt
----@field a git.File
----@field b git.File
+Diff2Ver.name = "diff2_vertical"
+
+---@class Diff2Ver.init.Opt
+---@field a vcs.File
+---@field b vcs.File
 ---@field winid_a integer
 ---@field winid_b integer
 
 ---@param opt Diff2Hor.init.Opt
 function Diff2Ver:init(opt)
-  Diff2Ver:super().init(self, opt)
+  self:super(opt)
 end
 
 ---@override
+---@param self Diff2Ver
 ---@param pivot integer?
-function Diff2Ver:create(pivot)
-  self.emitter:emit("create_pre", self)
+Diff2Ver.create = async.void(function(self, pivot)
+  self:create_pre()
   local curwin
 
   pivot = pivot or self:find_pivot()
@@ -60,8 +66,8 @@ function Diff2Ver:create(pivot)
 
   api.nvim_win_close(pivot, true)
   self.windows = { self.a, self.b }
-  self.emitter:emit("create_post", self)
-end
+  await(self:create_post())
+end)
 
 M.Diff2Ver = Diff2Ver
 return M

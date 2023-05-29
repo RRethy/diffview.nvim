@@ -1,14 +1,24 @@
-local async = require("plenary.async")
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 local oop = require("diffview.oop")
 
----@module "diffview.utils"
-local utils = lazy.require("diffview.utils")
+local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+
+local await = async.await
+local fmt = string.format
+local uv = vim.loop
 
 local M = {}
 
-local uv = vim.loop
 local is_windows = uv.os_uname().version:match("Windows")
+
+local function handle_uv_err(x, err, err_msg)
+  if not x then
+    error(err .. " " .. err_msg, 2)
+  end
+
+  return x
+end
 
 ---@class PathLib
 ---@field sep "/"|"\\"
@@ -23,10 +33,12 @@ function PathLib:init(o)
   self.cwd = o.cwd and self:convert(o.cwd) or nil
 end
 
+---@private
 function PathLib:_cwd()
   return self.cwd or self:convert(uv.cwd())
 end
 
+---@private
 ---@return ...
 function PathLib:_clean(...)
   local argc = select("#", ...)
@@ -444,8 +456,9 @@ end
 
 ---@param path string
 ---@param nosuf? boolean
+---@param list falsy
 ---@return string
----@overload fun(self: PathLib, path: string, nosuf: boolean, list: boolean): string[]
+---@overload fun(self: PathLib, path: string, nosuf: boolean, list: true): string[]
 function PathLib:vim_expand(path, nosuf, list)
   if list then
     return vim.tbl_map(function(v)
@@ -463,13 +476,13 @@ function PathLib:vim_fnamemodify(path, mods)
 end
 
 ---@param path string
----@return table|nil
+---@return table?
 function PathLib:stat(path)
   return uv.fs_stat(path)
 end
 
 ---@param path string
----@return string|nil
+---@return string?
 function PathLib:type(path)
   local p = uv.fs_realpath(path)
 
@@ -494,22 +507,92 @@ function PathLib:readable(path)
   local p = uv.fs_realpath(path)
 
   if p then
-    return uv.fs_access(p, "R")
+    return not not uv.fs_access(p, "R")
   end
 
   return false
 end
 
+---@class PathLib.touch.Opt
+---@field mode? integer
+---@field parents? boolean
+
+---@param self PathLib
+---@param path string
+---@param opt PathLib.touch.Opt
+PathLib.touch = async.void(function(self, path, opt)
+  opt = opt or {}
+  local mode = opt.mode or tonumber("0644", 8)
+
+  path = self:_clean(path)
+  local stat = self:stat(path)
+
+  if stat then
+    -- Path exists: just update utime
+    local time = os.time()
+    handle_uv_err(uv.fs_utime(path, time, time))
+    return
+  end
+
+  if opt.parents then
+    local parent = self:parent(path)
+
+    if parent then
+      await(self:mkdir(self:parent(path), { parents = true }))
+    end
+  end
+
+  local fd = handle_uv_err(uv.fs_open(path, "w", mode))
+  handle_uv_err(uv.fs_close(fd))
+end)
+
+---@class PathLib.mkdir.Opt
+---@field mode? integer
+---@field parents? boolean
+
+---@param self PathLib
+---@param path string
+---@param opt? table
+PathLib.mkdir = async.void(function(self, path, opt)
+  opt = opt or {}
+  local mode = opt.mode or tonumber("0700", 8)
+  path = self:absolute(path)
+
+  if not opt.parents then
+    handle_uv_err(uv.fs_mkdir(path, mode))
+    return
+  end
+
+  local cur_path
+
+  for _, part in ipairs(self:explode(path)) do
+    cur_path = cur_path and self:join(cur_path, part) or part
+    local stat = self:stat(cur_path)
+
+    if not stat then
+      handle_uv_err(uv.fs_mkdir(cur_path, mode))
+    else
+      if stat.type ~= "directory" then
+        error(fmt("Cannot create directory '%s': Not a directory", cur_path))
+      end
+    end
+  end
+end)
+
 ---Delete a name and possibly the file it refers to.
 ---@param self PathLib
 ---@param path string
----@param callback fun(err: string, ok: boolean)
+---@param callback? function
 ---@diagnostic disable-next-line: unused-local
 PathLib.unlink = async.wrap(function(self, path, callback)
+  ---@cast callback -?
   uv.fs_unlink(path, function(err, ok)
-    callback(ok, err)
+    if not ok then
+      error(err)
+    end
+    callback()
   end)
-end, 3)
+end)
 
 function PathLib:chain(...)
   local t = {

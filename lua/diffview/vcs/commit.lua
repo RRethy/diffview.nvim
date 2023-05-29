@@ -1,11 +1,8 @@
 local lazy = require("diffview.lazy")
 local oop = require("diffview.oop")
-local utils = require("diffview.utils")
 
----@type ERevType|LazyModule
-local RevType = lazy.access("diffview.git.rev", "RevType")
----@module "diffview.git.utils"
-local git = lazy.require("diffview.git.utils")
+local RevType = lazy.access("diffview.vcs.rev", "RevType") ---@type RevType|LazyModule
+local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
 
 local M = {}
 
@@ -15,10 +12,12 @@ local M = {}
 ---@field time number
 ---@field time_offset number
 ---@field date string
+---@field iso_date string
 ---@field rel_date string
 ---@field ref_names string
 ---@field subject string
 ---@field body string
+---@field diff? diff.FileEntry[]
 local Commit = oop.create_class("Commit")
 
 function Commit:init(opt)
@@ -29,54 +28,27 @@ function Commit:init(opt)
   self.ref_names = opt.ref_names ~= "" and opt.ref_names or nil
   self.subject = opt.subject
   self.body = opt.body
-
-  if opt.time_offset then
-    self.time_offset = Commit.parse_time_offset(opt.time_offset)
-    self.time = self.time - self.time_offset
-  else
-    self.time_offset = 0
-  end
-
-  self.iso_date = Commit.time_to_iso(self.time, self.time_offset)
+  self.diff = opt.diff
 end
+
+---@diagnostic disable: unused-local, missing-return
 
 ---@param rev_arg string
----@param git_toplevel string
+---@param adapter VCSAdapter
 ---@return Commit?
-function Commit.from_rev_arg(rev_arg, git_toplevel)
-  local out, code = git.exec_sync({
-    "show",
-    "--pretty=format:%H %P%n%an%n%ad%n%ar%n  %s",
-    "--date=raw",
-    "--name-status",
-    rev_arg,
-    "--",
-  }, git_toplevel)
-
-  if code ~= 0 then
-    return
-  end
-
-  local right_hash, _, _ = unpack(utils.str_split(out[1]))
-  local time, time_offset = unpack(utils.str_split(out[3]))
-
-  return Commit({
-    hash = right_hash,
-    author = out[2],
-    time = tonumber(time),
-    time_offset = time_offset,
-    rel_date = out[4],
-    subject = out[5]:sub(3),
-  })
+function Commit.from_rev_arg(rev_arg, adapter)
+  oop.abstract_stub()
 end
 
+---@diagnostic enable: unused-local, missing-return
+
 ---@param rev Rev
----@param git_toplevel string
+---@param adapter VCSAdapter
 ---@return Commit?
-function Commit.from_rev(rev, git_toplevel)
+function Commit.from_rev(rev, adapter)
   assert(rev.type == RevType.COMMIT, "Rev must be of type COMMIT!")
 
-  return Commit.from_rev_arg(rev.commit, git_toplevel)
+  return Commit.from_rev_arg(rev.commit, adapter)
 end
 
 function Commit.parse_time_offset(iso_date)

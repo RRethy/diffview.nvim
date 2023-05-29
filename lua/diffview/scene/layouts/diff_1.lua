@@ -1,38 +1,44 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 local Layout = require("diffview.scene.layout").Layout
 local oop = require("diffview.oop")
 
 local Diff3 = lazy.access("diffview.scene.layouts.diff_3", "Diff3") ---@type Diff3|LazyModule
 local Diff4 = lazy.access("diffview.scene.layouts.diff_4", "Diff4") ---@type Diff4|LazyModule
-local File = lazy.access("diffview.git.file", "File") ---@type git.File|LazyModule
-local Rev = lazy.access("diffview.git.rev", "Rev") ---@type Rev|LazyModule
-local RevType = lazy.access("diffview.git.rev", "RevType") ---@type RevType|LazyModule
+local File = lazy.access("diffview.vcs.file", "File") ---@type vcs.File|LazyModule
+local Rev = lazy.access("diffview.vcs.rev", "Rev") ---@type Rev|LazyModule
+local RevType = lazy.access("diffview.vcs.rev", "RevType") ---@type RevType|LazyModule
 local Window = lazy.access("diffview.scene.window", "Window") ---@type Window|LazyModule
 
 local api = vim.api
+local await = async.await
+
 local M = {}
 
 ---@class Diff1 : Layout
----@field a Window
+---@field b Window
 local Diff1 = oop.create_class("Diff1", Layout)
 
----@alias Diff1.WindowSymbol "a"
+---@alias Diff1.WindowSymbol "b"
 
 ---@class Diff1.init.Opt
----@field a git.File
----@field winid_a integer
+---@field b vcs.File
+---@field winid_b integer
+
+Diff1.name = "diff1_plain"
 
 ---@param opt Diff1.init.Opt
 function Diff1:init(opt)
-  Diff1:super().init(self)
-  self.a = Window({ file = opt.a, id = opt.winid_a })
-  self:use_windows(self.a)
+  self:super()
+  self.b = Window({ file = opt.b, id = opt.winid_b })
+  self:use_windows(self.b)
 end
 
 ---@override
+---@param self Diff1
 ---@param pivot integer?
-function Diff1:create(pivot)
-  self.emitter:emit("create_pre", self)
+Diff1.create = async.void(function(self, pivot)
+  self:create_pre()
   local curwin
 
   pivot = pivot or self:find_pivot()
@@ -48,38 +54,39 @@ function Diff1:create(pivot)
     vim.cmd("aboveleft vsp")
     curwin = api.nvim_get_current_win()
 
-    if self.a then
-      self.a:set_id(curwin)
+    if self.b then
+      self.b:set_id(curwin)
     else
-      self.a = Window({ id = curwin })
+      self.b = Window({ id = curwin })
     end
   end)
 
   api.nvim_win_close(pivot, true)
-  self.windows = { self.a }
-  self.emitter:emit("create_post", self)
+  self.windows = { self.b }
+  await(self:create_post())
+end)
+
+---@param file vcs.File
+function Diff1:set_file_b(file)
+  self.b:set_file(file)
+  file.symbol = "b"
 end
 
----@param file git.File
-function Diff1:set_file_a(file)
-  self.a:set_file(file)
-  file.symbol = "a"
-end
-
+---@param self Diff1
 ---@param entry FileEntry
-function Diff1:use_entry(entry)
+Diff1.use_entry = async.void(function(self, entry)
   local layout = entry.layout --[[@as Diff1 ]]
   assert(layout:instanceof(Diff1))
 
-  self:set_file_a(layout.a.file)
+  self:set_file_b(layout.b.file)
 
   if self:is_valid() then
-    self:open_files()
+    await(self:open_files())
   end
-end
+end)
 
 function Diff1:get_main_win()
-  return self.a
+  return self.b
 end
 
 ---@param layout Diff3
@@ -90,7 +97,7 @@ function Diff1:to_diff3(layout)
 
   return layout({
     a = File({
-      git_ctx = main.git_ctx,
+      adapter = main.adapter,
       path = main.path,
       kind = main.kind,
       commit = main.commit,
@@ -98,9 +105,9 @@ function Diff1:to_diff3(layout)
       rev = Rev(RevType.STAGE, 2),
       nulled = false, -- FIXME
     }),
-    b = self.a.file,
+    b = self.b.file,
     c = File({
-      git_ctx = main.git_ctx,
+      adapter = main.adapter,
       path = main.path,
       kind = main.kind,
       commit = main.commit,
@@ -119,7 +126,7 @@ function Diff1:to_diff4(layout)
 
   return layout({
     a = File({
-      git_ctx = main.git_ctx,
+      adapter = main.adapter,
       path = main.path,
       kind = main.kind,
       commit = main.commit,
@@ -127,9 +134,9 @@ function Diff1:to_diff4(layout)
       rev = Rev(RevType.STAGE, 2),
       nulled = false, -- FIXME
     }),
-    b = self.a.file,
+    b = self.b.file,
     c = File({
-      git_ctx = main.git_ctx,
+      adapter = main.adapter,
       path = main.path,
       kind = main.kind,
       commit = main.commit,
@@ -138,7 +145,7 @@ function Diff1:to_diff4(layout)
       nulled = false, -- FIXME
     }),
     d = File({
-      git_ctx = main.git_ctx,
+      adapter = main.adapter,
       path = main.path,
       kind = main.kind,
       commit = main.commit,

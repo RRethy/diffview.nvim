@@ -15,10 +15,10 @@ for any git rev.
 
 ## Requirements
 
-- Git ≥ 2.31.0
-- Neovim ≥ 0.7.0
-- [plenary.nvim](https://github.com/nvim-lua/plenary.nvim)
-- [nvim-web-devicons](https://github.com/kyazdani42/nvim-web-devicons) (optional) For file icons
+- Git ≥ 2.31.0 (for Git support)
+- Mercurial ≥ 5.4.0 (for Mercurial support)
+- Neovim ≥ 0.7.0 (with LuaJIT)
+- [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) (optional) For file icons
 
 ## Installation
 
@@ -26,13 +26,12 @@ Install the plugin with your package manager of choice.
 
 ```vim
 " Plug
-Plug 'nvim-lua/plenary.nvim'
 Plug 'sindrets/diffview.nvim'
 ```
 
 ```lua
 -- Packer
-use { 'sindrets/diffview.nvim', requires = 'nvim-lua/plenary.nvim' }
+use "sindrets/diffview.nvim" 
 ```
 
 ## Merge Tool
@@ -68,7 +67,7 @@ set of paths, and view the changes made in a diff split. This is a porcelain
 interface for git-log, and supports a good number of its options. Things like:
 
 - Filtering commits by grepping commit messages and commit authors.
-- Tracing the line evolution of a given set of line ranges for multiple files. 
+- Tracing the line evolution of a given set of line ranges for multiple files.
 - Only listing changes for a specific commit range, branch, or tag.
 - Following file changes through renames.
 
@@ -115,6 +114,14 @@ Additional commands for convenience:
 With a Diffview open and the default key bindings, you can cycle through changed
 files with `<tab>` and `<s-tab>` (see configuration to change the key bindings).
 
+#### Staging
+
+You can stage individual hunks by editing any buffer that represents the index
+(after running `:DiffviewOpen` with no `[git-rev]` the entries under "Changes"
+will have the index buffer on the left side, and the entries under "Staged
+changes" will have it on the right side). Once you write to an index buffer the
+index will be updated.
+
 ### `:[range]DiffviewFileHistory [paths] [options]`
 
 Opens a new file history view that lists all commits that affected the given
@@ -139,6 +146,30 @@ Examples:
 - `:DiffviewFileHistory --range=feat/example-branch`
 - `:'<,'>DiffviewFileHistory`
 
+### Familiarize Yourself With `:h diff-mode`
+
+| :information_source: This plugin assumes you're familiar with all the features already provided by nvim's builtin diff-mode |
+|:-----------------------------------------|
+
+These features include:
+
+- Jumping between hunks (`:h jumpto-diffs`).
+- Applying the changes of a diff hunk from any of the diffed buffers
+  (`:h copy-diffs`).
+- And more...
+
+Visit the help page for more info.
+
+---
+
+<br>
+
+#### :information_source: Additionally check out [USAGE](USAGE.md) for examples of some more specific use-cases
+
+<br>
+
+---
+
 ## Configuration
 
 <p>
@@ -153,7 +184,9 @@ require("diffview").setup({
   diff_binaries = false,    -- Show diffs for binaries
   enhanced_diff_hl = false, -- See ':h diffview-config-enhanced_diff_hl'
   git_cmd = { "git" },      -- The git executable followed by default args.
+  hg_cmd = { "hg" },        -- The hg executable followed by default args.
   use_icons = true,         -- Requires nvim-web-devicons
+  show_help_hints = true,   -- Show hints for how to open the help panel
   watch_index = true,       -- Update views and index buffers when the git index changes.
   icons = {                 -- Only applies when use_icons is true.
     folder_closed = "",
@@ -166,7 +199,7 @@ require("diffview").setup({
   },
   view = {
     -- Configure the layout and behavior of different types of views.
-    -- Available layouts: 
+    -- Available layouts:
     --  'diff1_plain'
     --    |'diff2_horizontal'
     --    |'diff2_vertical'
@@ -178,15 +211,18 @@ require("diffview").setup({
     default = {
       -- Config for changed files, and staged files in diff views.
       layout = "diff2_horizontal",
+      winbar_info = false,          -- See ':h diffview-config-view.x.winbar_info'
     },
     merge_tool = {
       -- Config for conflicted files in diff views during a merge or rebase.
       layout = "diff3_horizontal",
       disable_diagnostics = true,   -- Temporarily disable diagnostics for conflict buffers while in the view.
+      winbar_info = true,           -- See ':h diffview-config-view.x.winbar_info'
     },
     file_history = {
       -- Config for changed files in file history views.
       layout = "diff2_horizontal",
+      winbar_info = false,          -- See ':h diffview-config-view.x.winbar_info'
     },
   },
   file_panel = {
@@ -203,11 +239,17 @@ require("diffview").setup({
   },
   file_history_panel = {
     log_options = {   -- See ':h diffview-config-log_options'
-      single_file = {
-        diff_merges = "combined",
+      git = {
+        single_file = {
+          diff_merges = "combined",
+        },
+        multi_file = {
+          diff_merges = "first-parent",
+        },
       },
-      multi_file = {
-        diff_merges = "first-parent",
+      hg = {
+        single_file = {},
+        multi_file = {},
       },
     },
     win_config = {    -- See ':h diffview-config-win_config'
@@ -231,92 +273,124 @@ require("diffview").setup({
     view = {
       -- The `view` bindings are active in the diff buffers, only when the current
       -- tabpage is a Diffview.
-      ["<tab>"]      = actions.select_next_entry,         -- Open the diff for the next file
-      ["<s-tab>"]    = actions.select_prev_entry,         -- Open the diff for the previous file
-      ["gf"]         = actions.goto_file,                 -- Open the file in a new split in the previous tabpage
-      ["<C-w><C-f>"] = actions.goto_file_split,           -- Open the file in a new split
-      ["<C-w>gf"]    = actions.goto_file_tab,             -- Open the file in a new tabpage
-      ["<leader>e"]  = actions.focus_files,               -- Bring focus to the file panel
-      ["<leader>b"]  = actions.toggle_files,              -- Toggle the file panel.
-      ["g<C-x>"]     = actions.cycle_layout,              -- Cycle through available layouts.
-      ["[x"]         = actions.prev_conflict,             -- In the merge_tool: jump to the previous conflict
-      ["]x"]         = actions.next_conflict,             -- In the merge_tool: jump to the next conflict
-      ["<leader>co"] = actions.conflict_choose("ours"),   -- Choose the OURS version of a conflict
-      ["<leader>ct"] = actions.conflict_choose("theirs"), -- Choose the THEIRS version of a conflict
-      ["<leader>cb"] = actions.conflict_choose("base"),   -- Choose the BASE version of a conflict
-      ["<leader>ca"] = actions.conflict_choose("all"),    -- Choose all the versions of a conflict
-      ["dx"]         = actions.conflict_choose("none"),   -- Delete the conflict region
+      { "n", "<tab>",       actions.select_next_entry,              { desc = "Open the diff for the next file" } },
+      { "n", "<s-tab>",     actions.select_prev_entry,              { desc = "Open the diff for the previous file" } },
+      { "n", "gf",          actions.goto_file_edit,                 { desc = "Open the file in the previous tabpage" } },
+      { "n", "<C-w><C-f>",  actions.goto_file_split,                { desc = "Open the file in a new split" } },
+      { "n", "<C-w>gf",     actions.goto_file_tab,                  { desc = "Open the file in a new tabpage" } },
+      { "n", "<leader>e",   actions.focus_files,                    { desc = "Bring focus to the file panel" } },
+      { "n", "<leader>b",   actions.toggle_files,                   { desc = "Toggle the file panel." } },
+      { "n", "g<C-x>",      actions.cycle_layout,                   { desc = "Cycle through available layouts." } },
+      { "n", "[x",          actions.prev_conflict,                  { desc = "In the merge-tool: jump to the previous conflict" } },
+      { "n", "]x",          actions.next_conflict,                  { desc = "In the merge-tool: jump to the next conflict" } },
+      { "n", "<leader>co",  actions.conflict_choose("ours"),        { desc = "Choose the OURS version of a conflict" } },
+      { "n", "<leader>ct",  actions.conflict_choose("theirs"),      { desc = "Choose the THEIRS version of a conflict" } },
+      { "n", "<leader>cb",  actions.conflict_choose("base"),        { desc = "Choose the BASE version of a conflict" } },
+      { "n", "<leader>ca",  actions.conflict_choose("all"),         { desc = "Choose all the versions of a conflict" } },
+      { "n", "dx",          actions.conflict_choose("none"),        { desc = "Delete the conflict region" } },
+      { "n", "<leader>cO",  actions.conflict_choose_all("ours"),    { desc = "Choose the OURS version of a conflict for the whole file" } },
+      { "n", "<leader>cT",  actions.conflict_choose_all("theirs"),  { desc = "Choose the THEIRS version of a conflict for the whole file" } },
+      { "n", "<leader>cB",  actions.conflict_choose_all("base"),    { desc = "Choose the BASE version of a conflict for the whole file" } },
+      { "n", "<leader>cA",  actions.conflict_choose_all("all"),     { desc = "Choose all the versions of a conflict for the whole file" } },
+      { "n", "dX",          actions.conflict_choose_all("none"),    { desc = "Delete the conflict region for the whole file" } },
     },
-    diff1 = { --[[ Mappings in single window diff layouts ]] },
-    diff2 = { --[[ Mappings in 2-way diff layouts ]] },
+    diff1 = {
+      -- Mappings in single window diff layouts
+      { "n", "g?", actions.help({ "view", "diff1" }), { desc = "Open the help panel" } },
+    },
+    diff2 = {
+      -- Mappings in 2-way diff layouts
+      { "n", "g?", actions.help({ "view", "diff2" }), { desc = "Open the help panel" } },
+    },
     diff3 = {
       -- Mappings in 3-way diff layouts
-      { { "n", "x" }, "2do", actions.diffget("ours") },   -- Obtain the diff hunk from the OURS version of the file
-      { { "n", "x" }, "3do", actions.diffget("theirs") }, -- Obtain the diff hunk from the THEIRS version of the file
+      { { "n", "x" }, "2do",  actions.diffget("ours"),            { desc = "Obtain the diff hunk from the OURS version of the file" } },
+      { { "n", "x" }, "3do",  actions.diffget("theirs"),          { desc = "Obtain the diff hunk from the THEIRS version of the file" } },
+      { "n",          "g?",   actions.help({ "view", "diff3" }),  { desc = "Open the help panel" } },
     },
     diff4 = {
       -- Mappings in 4-way diff layouts
-      { { "n", "x" }, "1do", actions.diffget("base") },   -- Obtain the diff hunk from the BASE version of the file
-      { { "n", "x" }, "2do", actions.diffget("ours") },   -- Obtain the diff hunk from the OURS version of the file
-      { { "n", "x" }, "3do", actions.diffget("theirs") }, -- Obtain the diff hunk from the THEIRS version of the file
+      { { "n", "x" }, "1do",  actions.diffget("base"),            { desc = "Obtain the diff hunk from the BASE version of the file" } },
+      { { "n", "x" }, "2do",  actions.diffget("ours"),            { desc = "Obtain the diff hunk from the OURS version of the file" } },
+      { { "n", "x" }, "3do",  actions.diffget("theirs"),          { desc = "Obtain the diff hunk from the THEIRS version of the file" } },
+      { "n",          "g?",   actions.help({ "view", "diff4" }),  { desc = "Open the help panel" } },
     },
     file_panel = {
-      ["j"]             = actions.next_entry,         -- Bring the cursor to the next file entry
-      ["<down>"]        = actions.next_entry,
-      ["k"]             = actions.prev_entry,         -- Bring the cursor to the previous file entry.
-      ["<up>"]          = actions.prev_entry,
-      ["<cr>"]          = actions.select_entry,       -- Open the diff for the selected entry.
-      ["o"]             = actions.select_entry,
-      ["<2-LeftMouse>"] = actions.select_entry,
-      ["-"]             = actions.toggle_stage_entry, -- Stage / unstage the selected entry.
-      ["S"]             = actions.stage_all,          -- Stage all entries.
-      ["U"]             = actions.unstage_all,        -- Unstage all entries.
-      ["X"]             = actions.restore_entry,      -- Restore entry to the state on the left side.
-      ["L"]             = actions.open_commit_log,    -- Open the commit log panel.
-      ["<c-b>"]         = actions.scroll_view(-0.25), -- Scroll the view up
-      ["<c-f>"]         = actions.scroll_view(0.25),  -- Scroll the view down
-      ["<tab>"]         = actions.select_next_entry,
-      ["<s-tab>"]       = actions.select_prev_entry,
-      ["gf"]            = actions.goto_file,
-      ["<C-w><C-f>"]    = actions.goto_file_split,
-      ["<C-w>gf"]       = actions.goto_file_tab,
-      ["i"]             = actions.listing_style,        -- Toggle between 'list' and 'tree' views
-      ["f"]             = actions.toggle_flatten_dirs,  -- Flatten empty subdirectories in tree listing style.
-      ["R"]             = actions.refresh_files,        -- Update stats and entries in the file list.
-      ["<leader>e"]     = actions.focus_files,
-      ["<leader>b"]     = actions.toggle_files,
-      ["g<C-x>"]        = actions.cycle_layout,
-      ["[x"]            = actions.prev_conflict,
-      ["]x"]            = actions.next_conflict,
+      { "n", "j",              actions.next_entry,                     { desc = "Bring the cursor to the next file entry" } },
+      { "n", "<down>",         actions.next_entry,                     { desc = "Bring the cursor to the next file entry" } },
+      { "n", "k",              actions.prev_entry,                     { desc = "Bring the cursor to the previous file entry" } },
+      { "n", "<up>",           actions.prev_entry,                     { desc = "Bring the cursor to the previous file entry" } },
+      { "n", "<cr>",           actions.select_entry,                   { desc = "Open the diff for the selected entry" } },
+      { "n", "o",              actions.select_entry,                   { desc = "Open the diff for the selected entry" } },
+      { "n", "l",              actions.select_entry,                   { desc = "Open the diff for the selected entry" } },
+      { "n", "<2-LeftMouse>",  actions.select_entry,                   { desc = "Open the diff for the selected entry" } },
+      { "n", "-",              actions.toggle_stage_entry,             { desc = "Stage / unstage the selected entry" } },
+      { "n", "S",              actions.stage_all,                      { desc = "Stage all entries" } },
+      { "n", "U",              actions.unstage_all,                    { desc = "Unstage all entries" } },
+      { "n", "X",              actions.restore_entry,                  { desc = "Restore entry to the state on the left side" } },
+      { "n", "L",              actions.open_commit_log,                { desc = "Open the commit log panel" } },
+      { "n", "zo",             actions.open_fold,                      { desc = "Expand fold" } },
+      { "n", "h",              actions.close_fold,                     { desc = "Collapse fold" } },
+      { "n", "zc",             actions.close_fold,                     { desc = "Collapse fold" } },
+      { "n", "za",             actions.toggle_fold,                    { desc = "Toggle fold" } },
+      { "n", "zR",             actions.open_all_folds,                 { desc = "Expand all folds" } },
+      { "n", "zM",             actions.close_all_folds,                { desc = "Collapse all folds" } },
+      { "n", "<c-b>",          actions.scroll_view(-0.25),             { desc = "Scroll the view up" } },
+      { "n", "<c-f>",          actions.scroll_view(0.25),              { desc = "Scroll the view down" } },
+      { "n", "<tab>",          actions.select_next_entry,              { desc = "Open the diff for the next file" } },
+      { "n", "<s-tab>",        actions.select_prev_entry,              { desc = "Open the diff for the previous file" } },
+      { "n", "gf",             actions.goto_file_edit,                 { desc = "Open the file in the previous tabpage" } },
+      { "n", "<C-w><C-f>",     actions.goto_file_split,                { desc = "Open the file in a new split" } },
+      { "n", "<C-w>gf",        actions.goto_file_tab,                  { desc = "Open the file in a new tabpage" } },
+      { "n", "i",              actions.listing_style,                  { desc = "Toggle between 'list' and 'tree' views" } },
+      { "n", "f",              actions.toggle_flatten_dirs,            { desc = "Flatten empty subdirectories in tree listing style" } },
+      { "n", "R",              actions.refresh_files,                  { desc = "Update stats and entries in the file list" } },
+      { "n", "<leader>e",      actions.focus_files,                    { desc = "Bring focus to the file panel" } },
+      { "n", "<leader>b",      actions.toggle_files,                   { desc = "Toggle the file panel" } },
+      { "n", "g<C-x>",         actions.cycle_layout,                   { desc = "Cycle available layouts" } },
+      { "n", "[x",             actions.prev_conflict,                  { desc = "Go to the previous conflict" } },
+      { "n", "]x",             actions.next_conflict,                  { desc = "Go to the next conflict" } },
+      { "n", "g?",             actions.help("file_panel"),             { desc = "Open the help panel" } },
+      { "n", "<leader>cO",     actions.conflict_choose_all("ours"),    { desc = "Choose the OURS version of a conflict for the whole file" } },
+      { "n", "<leader>cT",     actions.conflict_choose_all("theirs"),  { desc = "Choose the THEIRS version of a conflict for the whole file" } },
+      { "n", "<leader>cB",     actions.conflict_choose_all("base"),    { desc = "Choose the BASE version of a conflict for the whole file" } },
+      { "n", "<leader>cA",     actions.conflict_choose_all("all"),     { desc = "Choose all the versions of a conflict for the whole file" } },
+      { "n", "dX",             actions.conflict_choose_all("none"),    { desc = "Delete the conflict region for the whole file" } },
     },
     file_history_panel = {
-      ["g!"]            = actions.options,          -- Open the option panel
-      ["<C-A-d>"]       = actions.open_in_diffview, -- Open the entry under the cursor in a diffview
-      ["y"]             = actions.copy_hash,        -- Copy the commit hash of the entry under the cursor
-      ["L"]             = actions.open_commit_log,
-      ["zR"]            = actions.open_all_folds,
-      ["zM"]            = actions.close_all_folds,
-      ["j"]             = actions.next_entry,
-      ["<down>"]        = actions.next_entry,
-      ["k"]             = actions.prev_entry,
-      ["<up>"]          = actions.prev_entry,
-      ["<cr>"]          = actions.select_entry,
-      ["o"]             = actions.select_entry,
-      ["<2-LeftMouse>"] = actions.select_entry,
-      ["<c-b>"]         = actions.scroll_view(-0.25),
-      ["<c-f>"]         = actions.scroll_view(0.25),
-      ["<tab>"]         = actions.select_next_entry,
-      ["<s-tab>"]       = actions.select_prev_entry,
-      ["gf"]            = actions.goto_file,
-      ["<C-w><C-f>"]    = actions.goto_file_split,
-      ["<C-w>gf"]       = actions.goto_file_tab,
-      ["<leader>e"]     = actions.focus_files,
-      ["<leader>b"]     = actions.toggle_files,
-      ["g<C-x>"]        = actions.cycle_layout,
+      { "n", "g!",            actions.options,                     { desc = "Open the option panel" } },
+      { "n", "<C-A-d>",       actions.open_in_diffview,            { desc = "Open the entry under the cursor in a diffview" } },
+      { "n", "y",             actions.copy_hash,                   { desc = "Copy the commit hash of the entry under the cursor" } },
+      { "n", "L",             actions.open_commit_log,             { desc = "Show commit details" } },
+      { "n", "zR",            actions.open_all_folds,              { desc = "Expand all folds" } },
+      { "n", "zM",            actions.close_all_folds,             { desc = "Collapse all folds" } },
+      { "n", "j",             actions.next_entry,                  { desc = "Bring the cursor to the next file entry" } },
+      { "n", "<down>",        actions.next_entry,                  { desc = "Bring the cursor to the next file entry" } },
+      { "n", "k",             actions.prev_entry,                  { desc = "Bring the cursor to the previous file entry." } },
+      { "n", "<up>",          actions.prev_entry,                  { desc = "Bring the cursor to the previous file entry." } },
+      { "n", "<cr>",          actions.select_entry,                { desc = "Open the diff for the selected entry." } },
+      { "n", "o",             actions.select_entry,                { desc = "Open the diff for the selected entry." } },
+      { "n", "<2-LeftMouse>", actions.select_entry,                { desc = "Open the diff for the selected entry." } },
+      { "n", "<c-b>",         actions.scroll_view(-0.25),          { desc = "Scroll the view up" } },
+      { "n", "<c-f>",         actions.scroll_view(0.25),           { desc = "Scroll the view down" } },
+      { "n", "<tab>",         actions.select_next_entry,           { desc = "Open the diff for the next file" } },
+      { "n", "<s-tab>",       actions.select_prev_entry,           { desc = "Open the diff for the previous file" } },
+      { "n", "gf",            actions.goto_file_edit,              { desc = "Open the file in the previous tabpage" } },
+      { "n", "<C-w><C-f>",    actions.goto_file_split,             { desc = "Open the file in a new split" } },
+      { "n", "<C-w>gf",       actions.goto_file_tab,               { desc = "Open the file in a new tabpage" } },
+      { "n", "<leader>e",     actions.focus_files,                 { desc = "Bring focus to the file panel" } },
+      { "n", "<leader>b",     actions.toggle_files,                { desc = "Toggle the file panel" } },
+      { "n", "g<C-x>",        actions.cycle_layout,                { desc = "Cycle available layouts" } },
+      { "n", "g?",            actions.help("file_history_panel"),  { desc = "Open the help panel" } },
     },
     option_panel = {
-      ["<tab>"] = actions.select_entry,
-      ["q"]     = actions.close,
+      { "n", "<tab>", actions.select_entry,          { desc = "Change the current option" } },
+      { "n", "q",     actions.close,                 { desc = "Close the panel" } },
+      { "n", "g?",    actions.help("option_panel"),  { desc = "Open the help panel" } },
+    },
+    help_panel = {
+      { "n", "q",     actions.close,  { desc = "Close help menu" } },
+      { "n", "<esc>", actions.close,  { desc = "Close help menu" } },
     },
   },
 })
@@ -345,7 +419,7 @@ hooks = {
   view_opened = function(view)
     print(
       ("A new %s was opened on tab page %d!")
-      :format(view:class():name(), view.tabpage)
+      :format(view.class:name(), view.tabpage)
     )
   end,
 }
@@ -369,13 +443,30 @@ either a vim command in the form of a string, or it can be a lua function:
   }
 ```
 
-To disable any single mapping without disabling them all, set its value to
+For more control (i.e. mappings for other modes), you can also define index
+values as list-like tables containing the arguments for `vim.keymap.set()`.
+This way you can also change all the `:map-arguments` with the only exception
+being the `buffer` field, as this will be overridden with the target buffer
+number:
+
+```lua
+view = {
+  -- Normal and visual mode mapping to vim command:
+  { { "n", "v" }, "<leader>a", "<Cmd>echom 'foo'<CR>", { silent = true } },
+  -- Visual mode mapping to lua function:
+  { "v", "<leader>b", function() print("bar") end, { nowait = true } },
+}
+```
+
+To disable any single mapping without disabling them all, set its `{rhs}` to
 `false`:
 
 ```lua
   view = {
-    -- Disable the default mapping for <tab>:
+    -- Disable the default normal mode mapping for `<tab>`:
     ["<tab>"] = false,
+    -- Disable the default visual mode mapping for `gf`:
+    { "x", "gf", false },
   }
 ```
 
@@ -413,5 +504,11 @@ git object database, and a command is echoed that shows how to undo the change.
   diff-mode?**
   - A: Change your `:h 'fillchars'`:
     - (vimscript): `set fillchars+=diff:╱`
+    - (Lua): `vim.opt.fillchars:append { diff = "╱" }`
   - Note: whether or not the diagonal lines will line up nicely will depend on
     your terminal emulator. The terminal used in the screenshots is Kitty.
+- **Q: How do I jump between hunks in the diff?**
+  - A: Use `[c` and `]c`
+  - `:h jumpto-diffs`
+
+<!-- vim: set tw=80 -->

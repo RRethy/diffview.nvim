@@ -1,10 +1,13 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 
 local DiffView = lazy.access("diffview.scene.views.diff.diff_view", "DiffView") ---@type DiffView|LazyModule
-local JobStatus = lazy.access("diffview.git.utils", "JobStatus") ---@type JobStatus|LazyModule
-local git = lazy.require("diffview.git.utils") ---@module "diffview.git.utils"
+local JobStatus = lazy.access("diffview.vcs.utils", "JobStatus") ---@type JobStatus|LazyModule
 local lib = lazy.require("diffview.lib") ---@module "diffview.lib"
 local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+local vcs_utils = lazy.require("diffview.vcs.utils") ---@module "diffview.vcs.utils"
+
+local await = async.await
 
 ---@param view FileHistoryView
 return function(view)
@@ -28,61 +31,26 @@ return function(view)
         end
       end
     end,
-    diff_buf_read = function(bufnr)
-      -- Set the cursor at the beginning of the -L range if possible.
-
-      local log_options = view.panel:get_log_options()
-      local cur = view.panel:cur_file()
-
-      if log_options.L[1] and bufnr == cur.layout:get_main_win().file.bufnr then
-        for _, value in ipairs(log_options.L) do
-          local l1, lpath = value:match("^(%d+),.*:(.*)")
-
-          if l1 then
-            l1 = tonumber(l1)
-            lpath = utils.path:chain(lpath)
-                :normalize({ cwd = view.git_ctx.toplevel, absolute = true })
-                :relative(view.git_ctx.toplevel)
-                :get()
-
-            if lpath == cur.path then
-              utils.set_cursor(0, l1, 0)
-              vim.cmd("norm! zt")
-              break
-            end
-          end
-        end
-      else
-        utils.set_cursor(0, 1, 0)
-      end
+    file_open_new = function(_, entry)
+      utils.set_cursor(view.cur_layout:get_main_win().id, 1, 0)
+      view.cur_layout:sync_scroll()
     end,
     open_in_diffview = function()
-      if view.panel:is_focused() then
-        local item = view.panel:get_item_at_cursor()
-        if item then
-          local file
+      local file = view:infer_cur_file()
 
-          if item.files then
-            file = item.files[1]
-          else
-            file = item --[[@as FileEntry ]]
-          end
+      if file then
+        local layout = file.layout --[[@as Diff2 ]]
 
-          if file then
-            local layout = file.layout --[[@as Diff2 ]]
+        local new_view = DiffView({
+          adapter = view.adapter,
+          rev_arg = view.adapter:rev_to_pretty_string(layout.a.file.rev, layout.b.file.rev),
+          left = layout.a.file.rev,
+          right = layout.b.file.rev,
+          options = { selected_file = file.absolute_path },
+        })
 
-            local new_view = DiffView({
-              git_ctx = view.git_ctx,
-              rev_arg = git.rev_to_pretty_string(layout.a.file.rev, layout.b.file.rev),
-              left = layout.a.file.rev,
-              right = layout.b.file.rev,
-              options = {},
-            }) --[[@as DiffView ]]
-
-            lib.add_view(new_view)
-            new_view:open()
-          end
-        end
+        lib.add_view(new_view)
+        new_view:open()
       end
     end,
     select_next_entry = function()
@@ -105,16 +73,16 @@ return function(view)
             if view.panel.single_file then
               view:set_file(item.files[1], false)
             else
-              view.panel:toggle_entry_fold(item)
+              view.panel:toggle_entry_fold(item --[[@as LogEntry ]])
             end
           else
             view:set_file(item, false)
           end
         end
       elseif view.panel.option_panel:is_focused() then
-        local item = view.panel.option_panel:get_item_at_cursor()
-        if item then
-          view.panel.option_panel.emitter:emit("set_option", item[1])
+        local option = view.panel.option_panel:get_item_at_cursor()
+        if option then
+          view.panel.option_panel.emitter:emit("set_option", option.key)
         end
       end
     end,
@@ -126,7 +94,7 @@ return function(view)
             if view.panel.single_file then
               view:set_file(item.files[1], true)
             else
-              view.panel:toggle_entry_fold(item)
+              view.panel:toggle_entry_fold(item --[[@as LogEntry ]])
             end
           else
             view:set_file(item, true)
@@ -139,7 +107,7 @@ return function(view)
       if file then
         local entry = view.panel:find_entry(file)
         if entry then
-          view.commit_log_panel:update(entry.commit.hash .. "^!")
+          view.commit_log_panel:update(view.adapter.Rev.to_range(entry.commit.hash))
         end
       end
     end,
@@ -177,6 +145,21 @@ return function(view)
         view.panel:redraw()
       end
     end,
+    open_fold = function()
+      if view.panel.single_file or not view.panel:is_focused() then return end
+      local entry = view.panel:get_log_entry_at_cursor()
+      if entry then view.panel:set_entry_fold(entry, true) end
+    end,
+    close_fold = function()
+      if view.panel.single_file or not view.panel:is_focused() then return end
+      local entry = view.panel:get_log_entry_at_cursor()
+      if entry then view.panel:set_entry_fold(entry, false) end
+    end,
+    toggle_fold = function()
+      if view.panel.single_file or not view.panel:is_focused() then return end
+      local entry = view.panel:get_log_entry_at_cursor()
+      if entry then view.panel:toggle_entry_fold(entry) end
+    end,
     close = function()
       if view.panel.option_panel:is_focused() then
         view.panel.option_panel:close()
@@ -198,5 +181,18 @@ return function(view)
         end
       end
     end,
+    restore_entry = async.void(function()
+      local item = view:infer_cur_file()
+      if not item then return end
+
+      local bufid = utils.find_file_buffer(item.path)
+
+      if bufid and vim.bo[bufid].modified then
+        utils.err("The file is open with unsaved changes! Aborting file restoration.")
+        return
+      end
+
+      await(vcs_utils.restore_file(view.adapter, item.path, item.kind, item.commit.hash))
+    end),
   }
 end

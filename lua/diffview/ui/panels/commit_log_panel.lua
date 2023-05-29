@@ -1,14 +1,16 @@
-local Job = require("plenary.job")
+local Job = require("diffview.job").Job
 local Panel = require("diffview.ui.panel").Panel
-local async = require("plenary.async")
+local async = require("diffview.async")
 local get_user_config = require("diffview.config").get_config
 local oop = require("diffview.oop")
 local utils = require("diffview.utils")
 
+local await = async.await
+
 local M = {}
 
 ---@class CommitLogPanel : Panel
----@field git_toplevel string
+---@field adapter VCSAdapter
 ---@field args string[]
 ---@field job_out string[]
 local CommitLogPanel = oop.create_class("CommitLogPanel", Panel)
@@ -47,15 +49,15 @@ end
 ---@field args string[]
 ---@field name string
 
----@param git_toplevel string
+---@param adapter VCSAdapter
 ---@param opt CommitLogPanelSpec
-function CommitLogPanel:init(git_toplevel, opt)
-  CommitLogPanel:super().init(self, {
+function CommitLogPanel:init(adapter, opt)
+  self:super({
     bufname = opt.name,
     config = opt.config or get_user_config().commit_log_panel.win_config,
   })
 
-  self.git_toplevel = git_toplevel
+  self.adapter = adapter
   self.args = opt.args or { "-n256" }
 
   self:on_autocmd("BufWinEnter" , {
@@ -72,35 +74,36 @@ CommitLogPanel.update = async.void(function(self, args)
     args = { args }
   end
 
-  Job:new({
-    command = "git",
-    args = utils.vec_join(
-      "log",
-      "--first-parent",
-      "--stat",
-      args or self.args
-    ),
-    cwd = self.git_toplevel,
-    on_exit = vim.schedule_wrap(function(job)
-      if job.code ~= 0 then
-        utils.err("Failed to open log!")
-        utils.handle_job(job)
-        return
-      end
+  local job = Job({
+    command = self.adapter:bin(),
+    args = self.adapter:get_log_args(args or self.args),
+    cwd = self.adapter.ctx.toplevel,
+  })
 
-      self.job_out = job:result()
+  local ok = await(job)
+  await(async.scheduler())
 
-      if not self:is_open() then
-        self:init_buffer()
-      else
-        self:render()
-        self:redraw()
-      end
+  if not ok then
+    utils.err("Failed to open log!")
+    return
+  end
 
-      self:focus()
-      vim.cmd("norm! gg")
-    end),
-  }):start()
+  self.job_out = utils.vec_slice(job.stdout)
+
+  if not next(self.job_out) then
+    utils.info("No log content available for these changes.")
+    return
+  end
+
+  if not self:is_open() then
+    self:init_buffer()
+  else
+    self:render()
+    self:redraw()
+  end
+
+  self:focus()
+  vim.cmd("norm! gg")
 end)
 
 function CommitLogPanel:update_components()

@@ -1,18 +1,16 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 local Window = require("diffview.scene.window").Window
 local Layout = require("diffview.scene.layout").Layout
 local oop = require("diffview.oop")
 
----@type Diff1|LazyModule
-local Diff1 = lazy.access("diffview.scene.layouts.diff_1", "Diff1")
----@type Diff4|LazyModule
-local Diff4 = lazy.access("diffview.scene.layouts.diff_4", "Diff4")
----@type git.File|LazyModule
-local File = lazy.access("diffview.git.file", "File")
----@type Rev|LazyModule
-local Rev = lazy.access("diffview.git.rev", "Rev")
----@type ERevType|LazyModule
-local RevType = lazy.access("diffview.git.rev", "RevType")
+local Diff1 = lazy.access("diffview.scene.layouts.diff_1", "Diff1") ---@type Diff1|LazyModule
+local Diff4 = lazy.access("diffview.scene.layouts.diff_4", "Diff4") ---@type Diff4|LazyModule
+local File = lazy.access("diffview.vcs.file", "File") ---@type vcs.File|LazyModule
+local Rev = lazy.access("diffview.vcs.rev", "Rev") ---@type Rev|LazyModule
+local RevType = lazy.access("diffview.vcs.rev", "RevType") ---@type RevType|LazyModule
+
+local await = async.await
 
 local M = {}
 
@@ -25,42 +23,43 @@ local Diff3 = oop.create_class("Diff3", Layout)
 ---@alias Diff3.WindowSymbol "a"|"b"|"c"
 
 ---@class Diff3.init.Opt
----@field a git.File
----@field b git.File
----@field c git.File
+---@field a vcs.File
+---@field b vcs.File
+---@field c vcs.File
 ---@field winid_a integer
 ---@field winid_b integer
 ---@field winid_c integer
 
 ---@param opt Diff3.init.Opt
 function Diff3:init(opt)
-  Diff3:super().init(self)
+  self:super()
   self.a = Window({ file = opt.a, id = opt.winid_a })
   self.b = Window({ file = opt.b, id = opt.winid_b })
   self.c = Window({ file = opt.c, id = opt.winid_c })
   self:use_windows(self.a, self.b, self.c)
 end
 
----@param file git.File
+---@param file vcs.File
 function Diff3:set_file_a(file)
   self.a:set_file(file)
   file.symbol = "a"
 end
 
----@param file git.File
+---@param file vcs.File
 function Diff3:set_file_b(file)
   self.b:set_file(file)
   file.symbol = "b"
 end
 
----@param file git.File
+---@param file vcs.File
 function Diff3:set_file_c(file)
   self.c:set_file(file)
   file.symbol = "c"
 end
 
+---@param self Diff3
 ---@param entry FileEntry
-function Diff3:use_entry(entry)
+Diff3.use_entry = async.void(function(self, entry)
   local layout = entry.layout --[[@as Diff3 ]]
   assert(layout:instanceof(Diff3))
 
@@ -69,9 +68,9 @@ function Diff3:use_entry(entry)
   self:set_file_c(layout.c.file)
 
   if self:is_valid() then
-    self:open_files()
+    await(self:open_files())
   end
-end
+end)
 
 function Diff3:get_main_win()
   return self.b
@@ -96,7 +95,7 @@ function Diff3:to_diff4(layout)
     b = self.b.file,
     c = self.c.file,
     d = File({
-      git_ctx = main.git_ctx,
+      adapter = main.adapter,
       path = main.path,
       kind = main.kind,
       commit = main.commit,

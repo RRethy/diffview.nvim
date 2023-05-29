@@ -1,8 +1,11 @@
+local async = require("diffview.async")
 local Window = require("diffview.scene.window").Window
 local Diff4 = require("diffview.scene.layouts.diff_4").Diff4
 local oop = require("diffview.oop")
 
 local api = vim.api
+local await = async.await
+
 local M = {}
 
 ---@class Diff4Mixed : Diff4
@@ -12,14 +15,17 @@ local M = {}
 ---@field d Window
 local Diff4Mixed = oop.create_class("Diff4Mixed", Diff4)
 
+Diff4Mixed.name = "diff4_mixed"
+
 function Diff4Mixed:init(opt)
-  Diff4Mixed:super().init(self, opt)
+  self:super(opt)
 end
 
 ---@override
+---@param self Diff4Mixed
 ---@param pivot integer?
-function Diff4Mixed:create(pivot)
-  self.emitter:emit("create_pre", self)
+Diff4Mixed.create = async.void(function(self, pivot)
+  self:create_pre()
   local curwin
 
   pivot = pivot or self:find_pivot()
@@ -77,8 +83,8 @@ function Diff4Mixed:create(pivot)
 
   api.nvim_win_close(pivot, true)
   self.windows = { self.a, self.b, self.c, self.d }
-  self.emitter:emit("create_post", self)
-end
+  await(self:create_post())
+end)
 
 M.Diff4Mixed = Diff4Mixed
 return M

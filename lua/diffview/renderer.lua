@@ -31,6 +31,7 @@ M.last_draw_time = 0
 ---@field parent RenderComponent
 ---@field lines string[]
 ---@field hl renderer.HlList
+---@field line_buffer string
 ---@field components RenderComponent[]
 ---@field lstart integer 0 indexed, Inclusive
 ---@field lend integer Exclusive
@@ -44,6 +45,7 @@ function RenderComponent:init(name)
   self.name = name or RenderComponent.next_uid()
   self.lines = {}
   self.hl = {}
+  self.line_buffer = ""
   self.components = {}
   self.lstart = -1
   self.lend = -1
@@ -132,9 +134,16 @@ function RenderComponent:remove_component(component)
   return false
 end
 
----@param line string
-function RenderComponent:add_line(line)
-  self.lines[#self.lines + 1] = line
+---@param line string?
+---@param hl_group string?
+function RenderComponent:add_line(line, hl_group)
+  if line and hl_group then
+    local first = #self.line_buffer
+    self:add_hl(hl_group, #self.lines, first, first + #line)
+  end
+
+  self.lines[#self.lines + 1] = self.line_buffer .. (line or "")
+  self.line_buffer = ""
 end
 
 ---@param group string
@@ -148,6 +157,23 @@ function RenderComponent:add_hl(group, line_idx, first, last)
     first = first,
     last = last,
   }
+end
+
+---@param text string
+---@param hl_group string?
+function RenderComponent:add_text(text, hl_group)
+  if hl_group then
+    local first = #self.line_buffer
+    self:add_hl(hl_group, #self.lines, first, first + #text)
+  end
+
+  self.line_buffer = self.line_buffer .. text
+end
+
+---Finalize current line
+function RenderComponent:ln()
+  self.lines[#self.lines + 1] = self.line_buffer
+  self.line_buffer = ""
 end
 
 function RenderComponent:clear()
@@ -173,6 +199,8 @@ function RenderComponent:destroy()
   self.components = nil
 end
 
+---@param line integer
+---@return RenderComponent?
 function RenderComponent:get_comp_on_line(line)
   line = line - 1
 
@@ -195,7 +223,7 @@ function RenderComponent:get_comp_on_line(line)
   return recurse(self)
 end
 
----@param callback function(comp: RenderComponent, i: integer, parent: RenderComponent)
+---@param callback fun(comp: RenderComponent, i: integer, parent: RenderComponent): boolean?
 function RenderComponent:some(callback)
   for i, child in ipairs(self.components) do
     if callback(child, i, self) then
@@ -204,6 +232,7 @@ function RenderComponent:some(callback)
   end
 end
 
+---@param callback fun(comp: RenderComponent, i: integer, parent: RenderComponent): boolean?
 function RenderComponent:deep_some(callback)
   local function wrap(comp, i, parent)
     if callback(comp, i, parent) then
@@ -346,7 +375,7 @@ function M.destroy_comp_struct(schema)
   end
 end
 
----Create a function to enable easily contraining the cursor to a given list of
+---Create a function to enable easily constraining the cursor to a given list of
 ---components.
 ---@param components RenderComponent[]
 function M.create_cursor_constraint(components)

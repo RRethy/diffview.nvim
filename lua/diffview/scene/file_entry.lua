@@ -1,20 +1,13 @@
 local lazy = require("diffview.lazy")
 local oop = require("diffview.oop")
 
----@type git.File|LazyModule
-local File = lazy.access("diffview.git.file", "File")
----@type RevType|LazyModule
-local RevType = lazy.access("diffview.git.rev", "RevType")
----@type Diff1|LazyModule
-local Diff1 = lazy.access("diffview.scene.layouts.diff_1", "Diff1")
----@type Diff2|LazyModule
-local Diff2 = lazy.access("diffview.scene.layouts.diff_2", "Diff2")
----@type Diff3|LazyModule
-local Diff3 = lazy.access("diffview.scene.layouts.diff_3", "Diff3")
----@type Diff4|LazyModule
-local Diff4 = lazy.access("diffview.scene.layouts.diff_4", "Diff4")
----@module "diffview.utils"
-local utils = lazy.require("diffview.utils")
+local Diff2 = lazy.access("diffview.scene.layouts.diff_2", "Diff2") ---@type Diff2|LazyModule
+local File = lazy.access("diffview.vcs.file", "File") ---@type vcs.File|LazyModule
+local RevType = lazy.access("diffview.vcs.rev", "RevType") ---@type RevType|LazyModule
+local utils = lazy.require("diffview.utils") ---@module "diffview.utils"
+
+local api = vim.api
+local pl = lazy.access(utils, "path") ---@type PathLib
 
 local M = {}
 
@@ -25,47 +18,62 @@ local fstat_cache = {}
 ---@field deletions integer
 ---@field conflicts integer
 
+---@class RevMap
+---@field a Rev
+---@field b Rev
+---@field c Rev
+---@field d Rev
+
 ---@class FileEntry : diffview.Object
----@field git_ctx GitContext
+---@field adapter GitAdapter
 ---@field path string
 ---@field oldpath string
 ---@field absolute_path string
 ---@field parent_path string
 ---@field basename string
 ---@field extension string
+---@field revs RevMap
 ---@field layout Layout
 ---@field status string
 ---@field stats GitStats
----@field kind git.FileKind
+---@field kind vcs.FileKind
 ---@field commit Commit|nil
+---@field merge_ctx vcs.MergeContext?
 ---@field active boolean
+---@field opened boolean
 local FileEntry = oop.create_class("FileEntry")
 
 ---@class FileEntry.init.Opt
----@field git_ctx GitContext
+---@field adapter GitAdapter
 ---@field path string
 ---@field oldpath string
+---@field revs RevMap
 ---@field layout Layout
 ---@field status string
 ---@field stats GitStats
----@field kind git.FileKind
+---@field kind vcs.FileKind
 ---@field commit? Commit
+---@field merge_ctx? vcs.MergeContext
 
 ---FileEntry constructor
 ---@param opt FileEntry.init.Opt
 function FileEntry:init(opt)
+  self.adapter = opt.adapter
   self.path = opt.path
   self.oldpath = opt.oldpath
-  self.absolute_path = utils.path:absolute(opt.path, opt.git_ctx.toplevel)
-  self.parent_path = utils.path:parent(opt.path) or ""
-  self.basename = utils.path:basename(opt.path)
-  self.extension = utils.path:extension(opt.path)
+  self.absolute_path = pl:absolute(opt.path, opt.adapter.ctx.toplevel)
+  self.parent_path = pl:parent(opt.path) or ""
+  self.basename = pl:basename(opt.path)
+  self.extension = pl:extension(opt.path)
+  self.revs = opt.revs
   self.layout = opt.layout
   self.status = opt.status
   self.stats = opt.stats
   self.kind = opt.kind
   self.commit = opt.commit
+  self.merge_ctx = opt.merge_ctx
   self.active = false
+  self.opened = false
 end
 
 function FileEntry:destroy()
@@ -97,207 +105,197 @@ end
 
 ---@param target_layout Layout
 function FileEntry:convert_layout(target_layout)
-    local cur_layout = self.layout
+  local get_data
 
-    if cur_layout:class() == target_layout:class() then return end
-
-    if cur_layout:instanceof(Diff1.__get()) then
-      ---@cast cur_layout Diff1
-      if target_layout:instanceof(Diff3.__get()) then
-        ---@cast target_layout Diff3
-        self.layout = cur_layout:to_diff3(target_layout)
-        return
-      elseif target_layout:instanceof(Diff4.__get()) then
-        ---@cast target_layout Diff4
-        self.layout = cur_layout:to_diff4(target_layout)
-        return
-      end
-    elseif cur_layout:instanceof(Diff2.__get()) then
-      ---@cast cur_layout Diff2
-      if target_layout:instanceof(Diff2.__get()) then
-        self.layout = target_layout({
-          a = cur_layout.a.file,
-          b = cur_layout.b.file,
-        })
-        return
-      end
-    elseif cur_layout:instanceof(Diff3.__get()) then
-      ---@cast cur_layout Diff3
-      if target_layout:instanceof(Diff1.__get()) then
-        ---@cast target_layout Diff1
-        self.layout = cur_layout:to_diff1(target_layout)
-        return
-      elseif target_layout:instanceof(Diff3.__get()) then
-        self.layout = target_layout({
-          a = cur_layout.a.file,
-          b = cur_layout.b.file,
-          c = cur_layout.c.file,
-        })
-        return
-      elseif target_layout:instanceof(Diff4.__get()) then
-        ---@cast target_layout Diff4
-        self.layout = cur_layout:to_diff4(target_layout)
-        return
-      end
-    elseif cur_layout:instanceof(Diff4.__get()) then
-      ---@cast cur_layout Diff4
-      if target_layout:instanceof(Diff1.__get()) then
-        ---@cast target_layout Diff1
-        self.layout = cur_layout:to_diff1(target_layout)
-        return
-      elseif target_layout:instanceof(Diff4.__get()) then
-        self.layout = target_layout({
-          a = cur_layout.a.file,
-          b = cur_layout.b.file,
-          c = cur_layout.c.file,
-          d = cur_layout.d.file,
-        })
-        return
-      elseif target_layout:instanceof(Diff3.__get()) then
-        ---@cast target_layout Diff3
-        self.layout = cur_layout:to_diff3(target_layout)
-        return
-      end
+  for _, file in ipairs(self.layout:files()) do
+    if file.get_data then
+      get_data = file.get_data
+      break
     end
+  end
 
-    error(("Unimplemented layout conversion: %s to %s"):format(
-      cur_layout:class(),
-      target_layout:class()
-    ))
+  local function create_file(rev, symbol)
+    return File({
+      adapter = self.adapter,
+      path = symbol == "a" and self.oldpath or self.path,
+      kind = self.kind,
+      commit = self.commit,
+      get_data = get_data,
+      rev = rev,
+      nulled = select(2, pcall(target_layout.should_null, rev, self.status, symbol)),
+    }) --[[@as vcs.File ]]
+  end
+
+  self.layout = target_layout({
+    a = utils.tbl_access(self.layout, "a.file") or create_file(self.revs.a, "a"),
+    b = utils.tbl_access(self.layout, "b.file") or create_file(self.revs.b, "b"),
+    c = utils.tbl_access(self.layout, "c.file") or create_file(self.revs.c, "c"),
+    d = utils.tbl_access(self.layout, "d.file") or create_file(self.revs.d, "d"),
+  })
+  self:update_merge_context()
 end
 
----@param git_ctx GitContext
 ---@param stat? table
-function FileEntry:validate_stage_buffers(git_ctx, stat)
-  stat = stat or utils.path:stat(utils.path:join(git_ctx.dir, "index"))
-  local cached_stat = utils.tbl_access(fstat_cache, { git_ctx.toplevel, "index" })
+function FileEntry:validate_stage_buffers(stat)
+  stat = stat or pl:stat(pl:join(self.adapter.ctx.dir, "index"))
+  local cached_stat = utils.tbl_access(fstat_cache, { self.adapter.ctx.toplevel, "index" })
 
-  if stat then
-    if not cached_stat or cached_stat.mtime < stat.mtime.sec then
-      for _, f in ipairs(self.layout:files()) do
-        if f.rev.type == RevType.STAGE then
+  if stat and (not cached_stat or cached_stat.mtime < stat.mtime.sec) then
+    for _, f in ipairs(self.layout:files()) do
+      if f.rev.type == RevType.STAGE and f:is_valid() then
+        if f.rev.stage > 0 then
+          -- We only care about stage 0 here
           f:dispose_buffer()
+        else
+          local is_modified = vim.bo[f.bufnr].modified
+
+          if f.blob_hash then
+            local new_hash = self.adapter:file_blob_hash(f.path)
+
+            if new_hash and new_hash ~= f.blob_hash then
+              if is_modified then
+                utils.warn((
+                  "A file was changed in the index since you started editing it!"
+                  .. " Be careful not to lose any staged changes when writing to this buffer: %s"
+                ):format(api.nvim_buf_get_name(f.bufnr)))
+              else
+                f:dispose_buffer()
+              end
+            end
+          elseif not is_modified then
+            -- Should be very rare that we don't have an index-buffer's blob
+            -- hash. But in that case, we can't warn the user when a file
+            -- changes in the index while they're editing its index buffer.
+            f:dispose_buffer()
+          end
         end
       end
     end
   end
 end
 
----@static
----@param git_ctx GitContext
-function FileEntry.update_index_stat(git_ctx, stat)
-  stat = stat or utils.path:stat(utils.path:join(git_ctx.toplevel, "index"))
+---Update winbar info
+---@param ctx? vcs.MergeContext
+function FileEntry:update_merge_context(ctx)
+  ctx = ctx or self.merge_ctx
+  if ctx then self.merge_ctx = ctx else return end
 
-  if stat then
-    if not fstat_cache[git_ctx.toplevel] then
-      fstat_cache[git_ctx.toplevel] = {}
+  local layout = self.layout --[[@as Diff4 ]]
+
+  if layout.a then
+    layout.a.file.winbar = (" OURS (Current changes) %s %s"):format(
+      (ctx.ours.hash):sub(1, 10),
+      ctx.ours.ref_names and ("(" .. ctx.ours.ref_names .. ")") or ""
+    )
+  end
+
+  if layout.b then
+    layout.b.file.winbar = " LOCAL (Working tree)"
+  end
+
+  if layout.c then
+    layout.c.file.winbar = (" THEIRS (Incoming changes) %s %s"):format(
+      (ctx.theirs.hash):sub(1, 10),
+      ctx.theirs.ref_names and ("(" .. ctx.theirs.ref_names .. ")") or ""
+    )
+  end
+
+  if layout.d then
+    layout.d.file.winbar = (" BASE (Common ancestor) %s %s"):format(
+      (ctx.base.hash):sub(1, 10),
+      ctx.base.ref_names and ("(" .. ctx.base.ref_names .. ")") or ""
+    )
+  end
+end
+
+---Derive custom folds from the hunks in a diff patch.
+---@param diff diff.FileEntry
+function FileEntry:update_patch_folds(diff)
+  if not self.layout:instanceof(Diff2.__get()) then return end
+
+  local layout = self.layout --[[@as Diff2 ]]
+  local folds = {
+    a = utils.tbl_set(layout.a.file, { "custom_folds" }, { type = "diff_patch" }),
+    b = utils.tbl_set(layout.b.file, { "custom_folds" }, { type = "diff_patch" }),
+  }
+
+  local lcount_a = api.nvim_buf_line_count(layout.a.file.bufnr)
+  local lcount_b = api.nvim_buf_line_count(layout.b.file.bufnr)
+
+  local prev_last_old, prev_last_new = 0, 0
+
+  for i = 1, #diff.hunks + 1 do
+    local hunk = diff.hunks[i]
+    local first_old, last_old, first_new, last_new
+
+    if hunk then
+      first_old = hunk.old_row
+      last_old = first_old + hunk.old_size - 1
+      first_new = hunk.new_row
+      last_new = first_new + hunk.new_size - 1
+    else
+      first_old = lcount_a + 1
+      first_new = lcount_b + 1
     end
 
-    fstat_cache[git_ctx.toplevel].index = {
+    if first_old - prev_last_old > 1 then
+      local prev_fold = folds.a[#folds.a]
+
+      if prev_fold and (prev_last_old + 1) - prev_fold[2] == 1 then
+        -- This fold is right next to the previous: merge the folds
+        prev_fold[2] = first_old - 1
+      else
+        table.insert(folds.a, { prev_last_old + 1, first_old - 1 })
+      end
+      -- print("old:", folds.a[#folds.a][1], folds.a[#folds.a][2])
+    end
+
+    if first_new - prev_last_new > 1 then
+      local prev_fold = folds.b[#folds.b]
+
+      if prev_fold and (prev_last_new + 1) - prev_fold[2] == 1 then
+        -- This fold is right next to the previous: merge the folds
+        prev_fold[2] = first_new - 1
+      else
+        table.insert(folds.b, { prev_last_new + 1, first_new - 1 })
+      end
+      -- print("new:", folds.b[#folds.b][1], folds.b[#folds.b][2])
+    end
+
+    prev_last_old = last_old
+    prev_last_new = last_new
+  end
+end
+
+---Check if the entry has custom diff patch folds.
+---@return boolean
+function FileEntry:has_patch_folds()
+  for _, file in ipairs(self.layout:files()) do
+    if not file.custom_folds or file.custom_folds.type ~= "diff_patch" then
+      return false
+    end
+  end
+
+  return true
+end
+
+---@static
+---@param adapter VCSAdapter
+function FileEntry.update_index_stat(adapter, stat)
+  stat = stat or pl:stat(pl:join(adapter.ctx.toplevel, "index"))
+
+  if stat then
+    if not fstat_cache[adapter.ctx.toplevel] then
+      fstat_cache[adapter.ctx.toplevel] = {}
+    end
+
+    fstat_cache[adapter.ctx.toplevel].index = {
       mtime = stat.mtime.sec,
     }
   end
 end
 
----@class FileEntry.from_d2.Opt : FileEntry.init.Opt
----@field rev_a Rev
----@field rev_b Rev
----@field nulled boolean
----@field get_data git.FileDataProducer?
-
----Create a file entry for a 2-way split diff layout.
----@param layout_class Diff2 (class)
----@param opt FileEntry.from_d2.Opt
----@return FileEntry
-function FileEntry.for_d2(layout_class, opt)
-  return FileEntry({
-    git_ctx = opt.git_ctx,
-    path = opt.path,
-    oldpath = opt.oldpath,
-    status = opt.status,
-    stats = opt.stats,
-    kind = opt.kind,
-    commit = opt.commit,
-    layout = layout_class({
-      a = File({
-        git_ctx = opt.git_ctx,
-        path = opt.oldpath or opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_a,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_a, opt.status, "a")),
-      }),
-      b = File({
-        git_ctx = opt.git_ctx,
-        path = opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_b,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_b, opt.status, "b")),
-      }),
-    }),
-  })
-end
-
----@class FileEntry.from_d3.Opt : FileEntry.init.Opt
----@field rev_a Rev
----@field rev_b Rev
----@field rev_c Rev
----@field nulled boolean
----@field get_data git.FileDataProducer?
-
----Create a file entry for a 2-way split diff layout.
----@param layout_class Diff3 (class)
----@param opt FileEntry.from_d3.Opt
----@return FileEntry
-function FileEntry.for_d3(layout_class, opt)
-  return FileEntry({
-    git_ctx = opt.git_ctx,
-    path = opt.path,
-    oldpath = opt.oldpath,
-    status = opt.status,
-    stats = opt.stats,
-    kind = opt.kind,
-    commit = opt.commit,
-    layout = layout_class({
-      a = File({
-        git_ctx = opt.git_ctx,
-        path = opt.oldpath or opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_a,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_a, opt.status, "a")),
-      }),
-      b = File({
-        git_ctx = opt.git_ctx,
-        path = opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_b,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_b, opt.status, "b")),
-      }),
-      c = File({
-        git_ctx = opt.git_ctx,
-        path = opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_c,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_c, opt.status, "c")),
-      }),
-    }),
-  })
-end
-
 ---@class FileEntry.with_layout.Opt : FileEntry.init.Opt
----@field rev_main Rev
----@field rev_ours Rev
----@field rev_theirs Rev
----@field rev_base Rev
 ---@field nulled boolean
 ---@field get_data git.FileDataProducer?
 
@@ -305,64 +303,36 @@ end
 ---@param opt FileEntry.with_layout.Opt
 ---@return FileEntry
 function FileEntry.with_layout(layout_class, opt)
-  local new_layout
-  local main_file = File({
-    git_ctx = opt.git_ctx,
-    path = opt.path,
-    kind = opt.kind,
-    commit = opt.commit,
-    get_data = opt.get_data,
-    rev = opt.rev_main,
-  }) --[[@as git.File ]]
-
-  if layout_class:instanceof(Diff1.__get()) then
-    main_file.nulled = layout_class.should_null(main_file.rev, opt.status, "a")
-    new_layout = layout_class({
-      a = main_file,
-    })
-  else
-    main_file.nulled = layout_class.should_null(main_file.rev, opt.status, "b")
-    new_layout = layout_class({
-      a = File({
-        git_ctx = opt.git_ctx,
-        path = opt.oldpath or opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_ours,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_ours, opt.status, "a")),
-      }),
-      b = main_file,
-      c = File({
-        git_ctx = opt.git_ctx,
-        path = opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_theirs,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_theirs, opt.status, "c")),
-      }),
-      d = File({
-        git_ctx = opt.git_ctx,
-        path = opt.path,
-        kind = opt.kind,
-        commit = opt.commit,
-        get_data = opt.get_data,
-        rev = opt.rev_base,
-        nulled = utils.sate(opt.nulled, layout_class.should_null(opt.rev_base, opt.status, "d")),
-      }),
-    })
+  local function create_file(rev, symbol)
+    return File({
+      adapter = opt.adapter,
+      path = symbol == "a" and opt.oldpath or opt.path,
+      kind = opt.kind,
+      commit = opt.commit,
+      get_data = opt.get_data,
+      rev = rev,
+      nulled = utils.sate(
+        opt.nulled,
+        select(2, pcall(layout_class.should_null, rev, opt.status, symbol))
+      ),
+    }) --[[@as vcs.File ]]
   end
 
   return FileEntry({
-    git_ctx = opt.git_ctx,
+    adapter = opt.adapter,
     path = opt.path,
     oldpath = opt.oldpath,
     status = opt.status,
     stats = opt.stats,
     kind = opt.kind,
     commit = opt.commit,
-    layout = new_layout,
+    revs = opt.revs,
+    layout = layout_class({
+      a = create_file(opt.revs.a, "a"),
+      b = create_file(opt.revs.b, "b"),
+      c = create_file(opt.revs.c, "c"),
+      d = create_file(opt.revs.d, "d"),
+    }),
   })
 end
 

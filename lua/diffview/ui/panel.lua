@@ -1,13 +1,16 @@
 local EventEmitter = require("diffview.events").EventEmitter
-local File = require("diffview.git.file").File
+local File = require("diffview.vcs.file").File
 local PerfTimer = require("diffview.perf").PerfTimer
-local logger = require("diffview.logger")
 local oop = require("diffview.oop")
 local renderer = require("diffview.renderer")
 local utils = require("diffview.utils")
 
-local M = {}
 local api = vim.api
+local logger = DiffviewGlobal.logger
+local pl = utils.path
+
+local M = {}
+
 local uid_counter = 0
 
 ---@alias PanelConfig PanelFloatSpec|PanelSplitSpec
@@ -294,7 +297,7 @@ function Panel:open()
   end
 
   self:resize()
-  utils.set_local(self.winid, self:class().winopts)
+  utils.set_local(self.winid, self.class.winopts)
   utils.set_local(self.winid, config.win_opts)
 end
 
@@ -308,7 +311,8 @@ function Panel:close()
     elseif self:is_focused() then
       vim.cmd("wincmd p")
     end
-    api.nvim_win_hide(self.winid)
+
+    pcall(api.nvim_win_close, self.winid, true)
   end
 end
 
@@ -345,12 +349,12 @@ end
 function Panel:init_buffer()
   local bn = api.nvim_create_buf(false, false)
 
-  for k, v in pairs(self:class().bufopts) do
+  for k, v in pairs(self.class.bufopts) do
     api.nvim_buf_set_option(bn, k, v)
   end
 
   local bufname
-  if utils.path:is_abs(self.bufname) or utils.path:is_uri(self.bufname) then
+  if pl:is_abs(self.bufname) or pl:is_uri(self.bufname) then
     bufname = self.bufname
   else
     bufname = string.format("diffview:///panels/%d/%s", Panel.next_uid(), self.bufname)
@@ -380,8 +384,9 @@ function Panel:init_buffer()
   return bn
 end
 
-Panel:virtual("update_components")
-Panel:virtual("render")
+function Panel:update_components() oop.abstract_stub() end
+
+function Panel:render() oop.abstract_stub() end
 
 function Panel:redraw()
   if not self.render_data then
@@ -390,7 +395,7 @@ function Panel:redraw()
   perf:reset()
   renderer.render(self.bufid, self.render_data)
   perf:time()
-  logger.lvl(10).s_debug(perf)
+  logger:lvl(10):debug(perf)
 end
 
 ---Update components, render and redraw.
@@ -413,10 +418,16 @@ function Panel:on_autocmd(event, opts)
     event = { event }
   end
 
-  local callback = function(state)
+  local callback = function(_, state)
     local win_match, buf_match
     if state.event:match("^Win") then
-      win_match = tonumber(state.match)
+      if vim.tbl_contains({ "WinLeave", "WinEnter" }, state.event)
+          and api.nvim_get_current_win() == self.winid
+      then
+        buf_match = state.buf
+      else
+        win_match = tonumber(state.match)
+      end
     elseif state.event:match("^Buf") then
       buf_match = state.buf
     end
@@ -464,7 +475,7 @@ function Panel:off_autocmd(callback, event)
 end
 
 function Panel:get_default_config(panel_type)
-  local producer = self:class()["default_config_" .. (panel_type or self:class().default_type)]
+  local producer = self.class["default_config_" .. (panel_type or self.class.default_type)]
 
   local config
   if vim.is_callable(producer) then

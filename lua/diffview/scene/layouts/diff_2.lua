@@ -1,7 +1,10 @@
-local RevType = require("diffview.git.rev").RevType
+local async = require("diffview.async")
+local RevType = require("diffview.vcs.rev").RevType
 local Window = require("diffview.scene.window").Window
 local Layout = require("diffview.scene.layout").Layout
 local oop = require("diffview.oop")
+
+local await = async.await
 
 local M = {}
 
@@ -13,33 +16,34 @@ local Diff2 = oop.create_class("Diff2", Layout)
 ---@alias Diff2.WindowSymbol "a"|"b"
 
 ---@class Diff2.init.Opt
----@field a git.File
----@field b git.File
+---@field a vcs.File
+---@field b vcs.File
 ---@field winid_a integer
 ---@field winid_b integer
 
 ---@param opt Diff2.init.Opt
 function Diff2:init(opt)
-  Diff2:super().init(self)
+  self:super()
   self.a = Window({ file = opt.a, id = opt.winid_a })
   self.b = Window({ file = opt.b, id = opt.winid_b })
   self:use_windows(self.a, self.b)
 end
 
----@param file git.File
+---@param file vcs.File
 function Diff2:set_file_a(file)
   self.a:set_file(file)
   file.symbol = "a"
 end
 
----@param file git.File
+---@param file vcs.File
 function Diff2:set_file_b(file)
   self.b:set_file(file)
   file.symbol = "b"
 end
 
+---@param self Diff2
 ---@param entry FileEntry
-function Diff2:use_entry(entry)
+Diff2.use_entry = async.void(function(self, entry)
   local layout = entry.layout --[[@as Diff2 ]]
   assert(layout:instanceof(Diff2))
 
@@ -47,9 +51,9 @@ function Diff2:use_entry(entry)
   self:set_file_b(layout.b.file)
 
   if self:is_valid() then
-    self:open_files()
+    await(self:open_files())
   end
-end
+end)
 
 function Diff2:get_main_win()
   return self.b

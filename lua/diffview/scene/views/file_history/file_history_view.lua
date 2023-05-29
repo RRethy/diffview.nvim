@@ -1,21 +1,23 @@
+local async = require("diffview.async")
 local lazy = require("diffview.lazy")
 local oop = require("diffview.oop")
 
 local CommitLogPanel = lazy.access("diffview.ui.panels.commit_log_panel", "CommitLogPanel") ---@type CommitLogPanel|LazyModule
-local Event = lazy.access("diffview.events", "Event") ---@type Event|LazyModule
-local FileEntry = lazy.access("diffview.scene.file_entry", "FileEntry") ---@type FileEntry|LazyModule
+local EventName = lazy.access("diffview.events", "EventName") ---@type EventName|LazyModule
 local FileHistoryPanel = lazy.access("diffview.scene.views.file_history.file_history_panel", "FileHistoryPanel") ---@type FileHistoryPanel|LazyModule
+local JobStatus = lazy.access("diffview.vcs.utils", "JobStatus") ---@type JobStatus|LazyModule
+local LogEntry = lazy.access("diffview.vcs.log_entry", "LogEntry") ---@type LogEntry|LazyModule
 local StandardView = lazy.access("diffview.scene.views.standard.standard_view", "StandardView") ---@type StandardView|LazyModule
 local config = lazy.require("diffview.config") ---@module "diffview.config"
-local git = lazy.require("diffview.git.utils") ---@module "diffview.git.utils"
 
-local JobStatus = lazy.access(git, "JobStatus") ---@type JobStatus|LazyModule
 local api = vim.api
+local await = async.await
 
 local M = {}
 
 ---@class FileHistoryView : StandardView
----@field git_ctx GitContext
+---@operator call:FileHistoryView
+---@field adapter VCSAdapter
 ---@field panel FileHistoryPanel
 ---@field commit_log_panel CommitLogPanel
 ---@field valid boolean
@@ -23,12 +25,12 @@ local FileHistoryView = oop.create_class("FileHistoryView", StandardView.__get()
 
 function FileHistoryView:init(opt)
   self.valid = false
-  self.git_ctx = opt.git_ctx
+  self.adapter = opt.adapter
 
-  FileHistoryView:super().init(self, {
+  self:super({
     panel = FileHistoryPanel({
       parent = self,
-      git_ctx = self.git_ctx,
+      adapter = self.adapter,
       entries = {},
       log_options = opt.log_options,
     }),
@@ -38,8 +40,8 @@ function FileHistoryView:init(opt)
 end
 
 function FileHistoryView:post_open()
-  self.commit_log_panel = CommitLogPanel(self.git_ctx.toplevel, {
-    name = ("diffview://%s/log/%d/%s"):format(self.git_ctx.dir, self.tabpage, "commit_log"),
+  self.commit_log_panel = CommitLogPanel(self.adapter, {
+    name = ("diffview://%s/log/%d/%s"):format(self.adapter.ctx.dir, self.tabpage, "commit_log"),
   })
 
   self:init_event_listeners()
@@ -71,7 +73,7 @@ function FileHistoryView:close()
     end
 
     self.commit_log_panel:destroy()
-    FileHistoryView:super().close(self)
+    FileHistoryView.super_class.close(self)
   end
 end
 
@@ -80,8 +82,12 @@ function FileHistoryView:cur_file()
   return self.panel.cur_item[2]
 end
 
+---@private
+---@param self FileHistoryView
 ---@param file FileEntry
-function FileHistoryView:_set_file(file)
+FileHistoryView._set_file = async.void(function(self, file)
+  self.panel:render()
+  self.panel:redraw()
   vim.cmd("redraw")
 
   self.cur_layout:detach_files()
@@ -89,12 +95,34 @@ function FileHistoryView:_set_file(file)
   self.emitter:emit("file_open_pre", file, cur_entry)
   self.nulled = false
 
-  file.layout.emitter:once("files_opened", function()
-    self.emitter:emit("file_open_post", file, cur_entry)
-  end)
+  await(self:use_entry(file))
 
-  self:use_entry(file)
-end
+  local log_options = self.panel:get_log_options()
+
+  -- For line tracing diffs: create custom folds derived from the diff patch
+  -- hunks. Should not be used with custom `++base` as then we won't know
+  -- where to create the custom folds in the base file.
+  if log_options.L and next(log_options.L) and not log_options.base then
+    local log_entry = self.panel.cur_item[1]
+    local diff = log_entry:get_diff(file.path)
+
+    if diff and not file:has_patch_folds() then
+      file:update_patch_folds(diff)
+
+      for _, win in ipairs(self.cur_layout.windows) do
+        win:use_winopts({ foldmethod = "manual" })
+        win:apply_custom_folds()
+      end
+    end
+  end
+
+  self.emitter:emit("file_open_post", file, cur_entry)
+
+  if not self.cur_entry.opened then
+    self.cur_entry.opened = true
+    DiffviewGlobal.emitter:emit("file_open_new", file)
+  end
+end)
 
 function FileHistoryView:next_item()
   self:ensure_layout()
@@ -132,7 +160,11 @@ function FileHistoryView:prev_item()
   end
 end
 
-function FileHistoryView:set_file(file, focus)
+---@param self FileHistoryView
+---@param file FileEntry
+---@param focus? boolean
+FileHistoryView.set_file = async.void(function(self, file, focus)
+  ---@diagnostic disable: invisible
   self:ensure_layout()
 
   if self:file_safeguard() or not file then return end
@@ -143,13 +175,14 @@ function FileHistoryView:set_file(file, focus)
     self.panel:set_cur_item({ entry, file })
     self.panel:highlight_item(file)
     self.nulled = false
-    self:_set_file(file)
+    await(self:_set_file(file))
 
     if focus then
       api.nvim_set_current_win(self.cur_layout:get_main_win().id)
     end
   end
-end
+  ---@diagnostic enable: invisible
+end)
 
 
 ---Ensures there are files to load, and loads the null buffer otherwise.
@@ -172,7 +205,7 @@ function FileHistoryView:file_safeguard()
 end
 
 function FileHistoryView:on_files_staged(callback)
-  self.emitter:on(Event.FILES_STAGED, callback)
+  self.emitter:on(EventName.FILES_STAGED, callback)
 end
 
 function FileHistoryView:init_event_listeners()
@@ -191,12 +224,12 @@ function FileHistoryView:infer_cur_file()
   if self.panel:is_focused() then
     local item = self.panel:get_item_at_cursor()
 
-    if item and not item:instanceof(FileEntry.__get()) then
+    if LogEntry.__get():ancestorof(item) then
+      ---@cast item LogEntry
       return item.files[1]
     end
 
-    ---@cast item FileEntry?
-    return item
+    return item --[[@as FileEntry ]]
   end
 
   return self.panel.cur_item[2]
@@ -211,6 +244,18 @@ end
 ---@override
 function FileHistoryView.get_default_layout_name()
   return config.get_config().view.file_history.layout
+end
+
+---@override
+---@return Layout # (class) The default layout class.
+function FileHistoryView.get_default_layout()
+  local name = FileHistoryView.get_default_layout_name()
+
+  if name == -1 then
+    return FileHistoryView.get_default_diff2()
+  end
+
+  return config.name_to_layout(name --[[@as string ]])
 end
 
 M.FileHistoryView = FileHistoryView
